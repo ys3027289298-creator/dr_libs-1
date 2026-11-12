@@ -349,6 +349,37 @@ typedef struct
     size_t rawDataSize;
 } drmp3_metadata;
 
+/*
+ID3v2 attached picture (APIC frame).
+
+`pData` points directly into the caller's ID3v2 tag buffer. No copy is made, so the tag buffer must remain
+valid while the picture data is in use.
+*/
+typedef struct
+{
+    char mime[64];                      /* Null-terminated MIME type, e.g. "image/jpeg". */
+    const drmp3_uint8* pData;           /* Pointer into the caller's tag buffer. Not allocated by dr_mp3. */
+    size_t size;                        /* Size in bytes of the picture data. */
+} drmp3_id3v2_picture;
+
+/*
+Reads a text frame (TIT2, TPE1, TALB, ...) from a raw ID3v2.3/ID3v2.4 tag and converts it to UTF-8.
+
+pID3v2Data must point to the beginning of the tag (the "ID3" header), exactly as delivered by the
+DRMP3_METADATA_TYPE_ID3V2 metadata callback. ISO-8859-1 and UTF-16 (with BOM) encodings are supported.
+Corrupt or out-of-bounds frames are skipped; decoding is never affected. Returns DRMP3_FALSE if the tag
+is absent/invalid or the frame was not found.
+*/
+DRMP3_API drmp3_bool32 drmp3_id3v2_read_text(const void* pID3v2Data, size_t dataSize, const char* pFrameID, char* pOutUTF8, size_t outCapacity);
+
+/*
+Reads the first APIC (attached picture) frame from a raw ID3v2.3/ID3v2.4 tag.
+
+The returned picture data pointer refers to memory inside pID3v2Data; dr_mp3 performs no allocation.
+Returns DRMP3_FALSE if the tag is absent/invalid or no APIC frame was found.
+*/
+DRMP3_API drmp3_bool32 drmp3_id3v2_read_picture(const void* pID3v2Data, size_t dataSize, drmp3_id3v2_picture* pPicture);
+
 
 /*
 Callback for when data is read. Return value is the number of bytes actually read.
@@ -4226,6 +4257,252 @@ DRMP3_API drmp3_bool32 drmp3_init_file_w(drmp3* pMP3, const wchar_t* pFilePath, 
     return drmp3_init_file_with_metadata_w(pMP3, pFilePath, NULL, NULL, pAllocationCallbacks);
 }
 #endif
+
+static drmp3_uint32 drmp3__id3v2_syncsafe(const drmp3_uint8* p)
+{
+    return ((drmp3_uint32)(p[0] & 0x7F) << 21) | ((drmp3_uint32)(p[1] & 0x7F) << 14) | ((drmp3_uint32)(p[2] & 0x7F) << 7) | (drmp3_uint32)(p[3] & 0x7F);
+}
+
+static drmp3_uint32 drmp3__id3v2_be32(const drmp3_uint8* p)
+{
+    return ((drmp3_uint32)p[0] << 24) | ((drmp3_uint32)p[1] << 16) | ((drmp3_uint32)p[2] << 8) | (drmp3_uint32)p[3];
+}
+
+/* Finds a frame in a raw ID3v2.3/2.4 tag. Corrupt frames are skipped; never fails hard. */
+static const drmp3_uint8* drmp3__id3v2_find_frame(const drmp3_uint8* pTag, size_t tagSize, const char* pFrameID, drmp3_uint32* pFrameSizeOut)
+{
+    drmp3_uint8 version, flags;
+    drmp3_uint32 tagDataSize, offset, tagEnd;
+
+    if (pTag == NULL || tagSize < 10 || pTag[0] != 'I' || pTag[1] != 'D' || pTag[2] != '3') {
+        return NULL;
+    }
+
+    version = pTag[3];
+    flags   = pTag[5];
+    if (version != 3 && version != 4) {
+        return NULL;    /* Only ID3v2.3 and ID3v2.4 are supported. */
+    }
+
+    tagDataSize = drmp3__id3v2_syncsafe(pTag + 6);
+    if ((drmp3_uint64)tagDataSize + 10 > tagSize) {
+        tagDataSize = (drmp3_uint32)tagSize - 10;   /* Clamp to the actual buffer to tolerate corrupt headers. */
+    }
+
+    offset = 10;
+    tagEnd = 10 + tagDataSize;
+
+    if (flags & 0x40) {
+        /* Extended header. v2.3 stores a regular BE32 excluding itself; v2.4 stores a syncsafe value including itself. */
+        drmp3_uint32 extSize;
+        if (tagDataSize < 4) {
+            return NULL;
+        }
+        extSize = (version == 4) ? drmp3__id3v2_syncsafe(pTag + offset) : drmp3__id3v2_be32(pTag + offset) + 4;
+        if (extSize >= tagDataSize) {
+            return NULL;
+        }
+        offset += extSize;
+    }
+
+    while (offset + 10 <= tagEnd) {
+        const drmp3_uint8* pFrame = pTag + offset;
+        drmp3_uint32 frameSize, i;
+
+        if (pFrame[0] == 0) {
+            break;  /* Reached the padding region. */
+        }
+        for (i = 0; i < 4; i++) {
+            drmp3_uint8 c = pFrame[i];
+            if (!((c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9'))) {
+                return NULL;    /* Invalid frame ID. Tag is desynchronized; cannot safely continue. */
+            }
+        }
+
+        frameSize = (version == 4) ? drmp3__id3v2_syncsafe(pFrame + 4) : drmp3__id3v2_be32(pFrame + 4);
+        if (frameSize > tagEnd - (offset + 10)) {
+            frameSize = tagEnd - (offset + 10); /* Frame length out of bounds: clamp and treat as the last frame. */
+        }
+
+        if (pFrame[0] == pFrameID[0] && pFrame[1] == pFrameID[1] && pFrame[2] == pFrameID[2] && pFrame[3] == pFrameID[3]) {
+            *pFrameSizeOut = frameSize;
+            return pFrame + 10;
+        }
+
+        offset += 10 + frameSize;
+    }
+
+    return NULL;
+}
+
+static size_t drmp3__id3v2_put_utf8(char* pOut, size_t capacity, size_t length, drmp3_uint32 cp)
+{
+    char encoded[4];
+    size_t encodedSize, i;
+
+    if (cp < 0x80) {
+        encoded[0] = (char)cp; encodedSize = 1;
+    } else if (cp < 0x800) {
+        encoded[0] = (char)(0xC0 | (cp >> 6));
+        encoded[1] = (char)(0x80 | (cp & 0x3F)); encodedSize = 2;
+    } else if (cp < 0x10000) {
+        encoded[0] = (char)(0xE0 | (cp >> 12));
+        encoded[1] = (char)(0x80 | ((cp >> 6) & 0x3F));
+        encoded[2] = (char)(0x80 | (cp & 0x3F)); encodedSize = 3;
+    } else {
+        encoded[0] = (char)(0xF0 | (cp >> 18));
+        encoded[1] = (char)(0x80 | ((cp >> 12) & 0x3F));
+        encoded[2] = (char)(0x80 | ((cp >> 6) & 0x3F));
+        encoded[3] = (char)(0x80 | (cp & 0x3F)); encodedSize = 4;
+    }
+
+    for (i = 0; i < encodedSize; i++) {
+        if (length + 1 < capacity) {
+            pOut[length] = encoded[i];
+        }
+        length += 1;
+    }
+
+    return length;
+}
+
+DRMP3_API drmp3_bool32 drmp3_id3v2_read_text(const void* pID3v2Data, size_t dataSize, const char* pFrameID, char* pOutUTF8, size_t outCapacity)
+{
+    const drmp3_uint8* pFrame;
+    const drmp3_uint8* p;
+    drmp3_uint32 frameSize;
+    drmp3_uint8 encoding;
+    size_t remaining, length = 0;
+
+    if (pOutUTF8 == NULL || outCapacity == 0 || pFrameID == NULL) {
+        return DRMP3_FALSE;
+    }
+    pOutUTF8[0] = '\0';
+
+    pFrame = drmp3__id3v2_find_frame((const drmp3_uint8*)pID3v2Data, dataSize, pFrameID, &frameSize);
+    if (pFrame == NULL || frameSize < 1) {
+        return DRMP3_FALSE;
+    }
+
+    encoding  = pFrame[0];
+    p         = pFrame + 1;
+    remaining = frameSize - 1;
+
+    if (encoding == 0x00) {         /* ISO-8859-1 */
+        while (remaining > 0 && p[remaining-1] == 0) remaining--;   /* Trim trailing terminators. */
+        while (remaining-- > 0) {
+            length = drmp3__id3v2_put_utf8(pOutUTF8, outCapacity, length, *p++);
+        }
+    } else if (encoding == 0x01 || encoding == 0x02) {  /* UTF-16 (0x01 carries a BOM; 0x02 is BE without BOM). */
+        drmp3_bool32 littleEndian = DRMP3_FALSE;
+        if (encoding == 0x01) {
+            if (remaining >= 2 && p[0] == 0xFF && p[1] == 0xFE) { littleEndian = DRMP3_TRUE;  p += 2; remaining -= 2; }
+            else if (remaining >= 2 && p[0] == 0xFE && p[1] == 0xFF) {                        p += 2; remaining -= 2; }
+            /* No BOM: default to big-endian per the ID3v2 spec. */
+        }
+        while (remaining >= 2 && ((p[remaining-2] == 0 && p[remaining-1] == 0))) remaining -= 2;
+        while (remaining >= 2) {
+            drmp3_uint32 unit = littleEndian ? (drmp3_uint32)p[0] | ((drmp3_uint32)p[1] << 8) : ((drmp3_uint32)p[0] << 8) | p[1];
+            p += 2; remaining -= 2;
+            if (unit >= 0xD800 && unit <= 0xDBFF && remaining >= 2) {   /* Surrogate pair. */
+                drmp3_uint32 lo = littleEndian ? (drmp3_uint32)p[0] | ((drmp3_uint32)p[1] << 8) : ((drmp3_uint32)p[0] << 8) | p[1];
+                if (lo >= 0xDC00 && lo <= 0xDFFF) {
+                    unit = 0x10000 + ((unit - 0xD800) << 10) + (lo - 0xDC00);
+                    p += 2; remaining -= 2;
+                }
+            }
+            length = drmp3__id3v2_put_utf8(pOutUTF8, outCapacity, length, unit);
+        }
+    } else if (encoding == 0x03) {  /* UTF-8 */
+        while (remaining > 0 && p[remaining-1] == 0) remaining--;
+        while (remaining-- > 0) {
+            if (length + 1 < outCapacity) pOutUTF8[length] = (char)*p;
+            length += 1; p += 1;
+        }
+    } else {
+        return DRMP3_FALSE; /* Unknown encoding. Skip this frame. */
+    }
+
+    if (length >= outCapacity) {
+        length = outCapacity - 1;   /* Truncated. Keep the output null-terminated. */
+    }
+    pOutUTF8[length] = '\0';
+
+    return DRMP3_TRUE;
+}
+
+DRMP3_API drmp3_bool32 drmp3_id3v2_read_picture(const void* pID3v2Data, size_t dataSize, drmp3_id3v2_picture* pPicture)
+{
+    const drmp3_uint8* pFrame;
+    const drmp3_uint8* p;
+    const drmp3_uint8* pEnd;
+    drmp3_uint32 frameSize;
+    drmp3_uint8 encoding;
+    size_t mimeLength = 0;
+
+    if (pPicture == NULL) {
+        return DRMP3_FALSE;
+    }
+    DRMP3_ZERO_OBJECT(pPicture);
+
+    pFrame = drmp3__id3v2_find_frame((const drmp3_uint8*)pID3v2Data, dataSize, "APIC", &frameSize);
+    if (pFrame == NULL || frameSize < 4) {  /* Need at least encoding, empty MIME, picture type and terminator. */
+        return DRMP3_FALSE;
+    }
+
+    encoding = pFrame[0];
+    p        = pFrame + 1;
+    pEnd     = pFrame + frameSize;
+
+    /* MIME type: null-terminated ISO-8859-1. */
+    while (p + mimeLength < pEnd && p[mimeLength] != 0) {
+        mimeLength++;
+    }
+    if (p + mimeLength >= pEnd) {
+        return DRMP3_FALSE; /* Unterminated MIME string. */
+    }
+    if (mimeLength >= sizeof(pPicture->mime)) {
+        mimeLength = sizeof(pPicture->mime) - 1;
+    }
+    DRMP3_COPY_MEMORY(pPicture->mime, p, mimeLength);
+    pPicture->mime[mimeLength] = '\0';
+    p += mimeLength + 1;
+    if (p >= pEnd) {
+        return DRMP3_FALSE;
+    }
+
+    p += 1; /* Picture type byte. */
+
+    /* Description: null-terminated. Terminator is 2 bytes for UTF-16 encodings, 1 byte otherwise. */
+    if (encoding == 0x01 || encoding == 0x02) {
+        for (;;) {
+            if (p + 1 >= pEnd) {
+                return DRMP3_FALSE;
+            }
+            if (p[0] == 0 && p[1] == 0) {
+                p += 2;
+                break;
+            }
+            p += 2;
+        }
+    } else {
+        for (;;) {
+            if (p >= pEnd) {
+                return DRMP3_FALSE;
+            }
+            if (*p == 0) {
+                p += 1;
+                break;
+            }
+            p += 1;
+        }
+    }
+
+    pPicture->pData = p;    /* Points into the caller's buffer. No allocation. */
+    pPicture->size  = (size_t)(pEnd - p);
+
+    return DRMP3_TRUE;
+}
 
 DRMP3_API void drmp3_uninit(drmp3* pMP3)
 {

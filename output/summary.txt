@@ -1,0 +1,11 @@
+artifacts:
+total 96
+drwxr-xr-x 2 ys ys  4096 Nov 12 16:49 .
+drwxr-xr-x 8 ys ys  4096 Nov 12 16:49 ..
+-rwxr-xr-x 1 ys ys 67224 Nov 12 16:49 check_id3
+-rw-r--r-- 1 ys ys  1752 Nov 12 16:49 corrupt.mp3
+-rw-r--r-- 1 ys ys  1668 Nov 12 16:49 notag.mp3
+-rw-r--r-- 1 ys ys    11 Nov 12 16:49 summary.txt
+-rw-r--r-- 1 ys ys  1765 Nov 12 16:49 v23_utf16.mp3
+-rw-r--r-- 1 ys ys  1784 Nov 12 16:49 v24_cover.mp3
+total runtime: 32s
