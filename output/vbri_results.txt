@@ -1,0 +1,11 @@
+== dr_mp3 (tests/vbri/vbri_check.c) ==
+vbri_stereo.mp3 frames=15 duration=0.391837 avg_bitrate=128890
+vbri_mono.mp3 frames=15 duration=0.391837 avg_bitrate=64884
+vbri_corrupt.mp3 frames=15 duration=0.391837 avg_bitrate=128890
+no_vbr_header.mp3 frames=15 duration=0.391837 avg_bitrate=128890
+
+== ffprobe reference ==
+vbri_stereo.mp3 duration=0.391837 avg_bitrate=128890
+vbri_mono.mp3 duration=0.391837 avg_bitrate=64884
+vbri_corrupt.mp3 duration=0.391813 avg_bitrate=128898
+no_vbr_header.mp3 duration=0.391813 avg_bitrate=128898

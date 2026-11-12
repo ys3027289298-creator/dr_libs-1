@@ -429,6 +429,7 @@ typedef struct
     drmp3_uint64 totalPCMFrameCount;    /* Set to DRMP3_UINT64_MAX if the length is unknown. Includes delay and padding. */
     drmp3_bool32 isVBR;
     drmp3_bool32 isCBR;
+    drmp3_uint32 averageBitrate;        /* Average bitrate in bits per second. Set to 0 when unknown (no Xing/Info or VBRI tag). */
     size_t dataSize;
     size_t dataCapacity;
     size_t dataConsumed;
@@ -3286,7 +3287,72 @@ static drmp3_bool32 drmp3_init_internal(drmp3* pMP3, drmp3_read_proc onRead, drm
                 drmp3_bs_get_bits(&bs, 16); /* CRC. */
             }
 
+            /*
+            Check for a VBRI tag first. Unlike Xing/Info, VBRI sits at a fixed offset (36 bytes after the frame header) regardless
+            of side info, so when both are present the one at the lower offset wins, which is always VBRI. A malformed tag is
+            ignored so initialization succeeds and the caller falls back to estimating the length from the file size.
+            */
+            {
+                const drmp3_uint8* pVBRITag = pFirstFrameData + 36;
+                const void* pVBRIEnd = NULL;
+
+                if (pMP3->memory.pData != NULL && pMP3->memory.dataSize > 0) {
+                    pVBRIEnd = pMP3->memory.pData + pMP3->memory.dataSize;
+                } else {
+                    pVBRIEnd = pMP3->pData + pMP3->dataCapacity;
+                }
+
+                if ((drmp3_uint8*)pVBRIEnd - pFirstFrameData >= 36 + 26 &&
+                    pVBRITag[0] == 'V' && pVBRITag[1] == 'B' && pVBRITag[2] == 'R' && pVBRITag[3] == 'I') {
+                    drmp3_uint32 vbriBytes;
+                    drmp3_uint32 vbriFrames;
+
+                    /* Layout from the "VBRI" magic: version(2) delay(2) quality(2), then stream bytes(4) at tag+10 and frame count(4) at tag+14. */
+                    vbriBytes  = (drmp3_uint32)pVBRITag[10] << 24 | (drmp3_uint32)pVBRITag[11] << 16 | (drmp3_uint32)pVBRITag[12] << 8 | (drmp3_uint32)pVBRITag[13];
+                    vbriFrames = (drmp3_uint32)pVBRITag[14] << 24 | (drmp3_uint32)pVBRITag[15] << 16 | (drmp3_uint32)pVBRITag[16] << 8 | (drmp3_uint32)pVBRITag[17];
+
+                    if (vbriBytes != 0 && vbriFrames != 0) {
+                        drmp3_uint64 totalBytes = (pMP3->streamLength != DRMP3_UINT64_MAX) ? pMP3->streamLength : (drmp3_uint64)vbriBytes;
+
+                        pMP3->isVBR = DRMP3_TRUE;
+                        pMP3->averageBitrate = (drmp3_uint32)((totalBytes * 8 * (drmp3_uint64)firstFrameInfo.sample_rate) / ((drmp3_uint64)vbriFrames * (drmp3_uint64)firstFramePCMFrameCount));
+                        detectedMP3FrameCount = vbriFrames;
+
+                        if (onMeta != NULL) {
+                            drmp3__on_meta(pMP3, DRMP3_METADATA_TYPE_VBRI, pVBRITag, 26);
+                        }
+
+                        /* Since this was identified as a tag, we don't want to treat it as audio. We need to clear out the PCM cache. */
+                        pMP3->pcmFramesRemainingInMP3Frame = 0;
+
+                        /*
+                        Start after this frame, including any bytes skipped before it, so seeking does not decode the tag as audio.
+                        On the memory path the frame's file offset is just its pointer minus the buffer base. On the callback path
+                        streamCursor is the raw read position and the frame sits at the buffer base plus dataConsumed.
+                        */
+                        if (pMP3->memory.pData != NULL) {
+                            pMP3->streamStartOffset = (drmp3_uint64)(pFirstFrameData - pMP3->memory.pData);
+                        } else {
+                            pMP3->streamStartOffset = pMP3->streamCursor - pMP3->dataSize - pMP3->dataConsumed;
+                        }
+
+                        /*
+                        The internal decoder needs to be reset to clear out any state. If we don't reset this state, it's possible for
+                        there to be inconsistencies in the number of samples read when reading to the end of the stream depending on
+                        whether or not the caller seeks to the start of the stream.
+                        */
+                        drmp3dec_init(&pMP3->decoder);
+
+                        goto done_xing_info;
+                    }
+
+                    /* Corrupt VBRI tag (zero frame or byte count). Fall through and behave as if no VBR tag was present. */
+                }
+            }
+
             if (drmp3_L3_read_side_info(&bs, grInfo, pFirstFrameData) >= 0) {
+                /* Inner scope keeps C++ happy: the VBRI block above may goto done_xing_info, which must not cross these initializers. */
+                {
                 drmp3_bool32 isXing = DRMP3_FALSE;
                 drmp3_bool32 isInfo = DRMP3_FALSE;
                 const drmp3_uint8* pTagData;
@@ -3319,6 +3385,7 @@ static drmp3_bool32 drmp3_init_internal(drmp3* pMP3, drmp3_read_proc onRead, drm
 
                 if (isXing || isInfo) {
                     drmp3_uint32 bytes = 0;
+                    drmp3_uint32 frames = 0;
                     drmp3_uint32 flags = pTagData[7];
 
                     pTagData += 8;  /* Skip past the ID and flags. */
@@ -3328,7 +3395,8 @@ static drmp3_bool32 drmp3_init_internal(drmp3* pMP3, drmp3_read_proc onRead, drm
                             goto done_xing_info;    /* Invalid Xing/Info tag. */
                         }
 
-                        detectedMP3FrameCount = (drmp3_uint32)pTagData[0] << 24 | (drmp3_uint32)pTagData[1] << 16 | (drmp3_uint32)pTagData[2] << 8 | (drmp3_uint32)pTagData[3];
+                        frames = (drmp3_uint32)pTagData[0] << 24 | (drmp3_uint32)pTagData[1] << 16 | (drmp3_uint32)pTagData[2] << 8 | (drmp3_uint32)pTagData[3];
+                        detectedMP3FrameCount = frames;
                         pTagData += 4;
                     }
 
@@ -3395,6 +3463,11 @@ static drmp3_bool32 drmp3_init_internal(drmp3* pMP3, drmp3_read_proc onRead, drm
                         pMP3->isCBR = DRMP3_TRUE;
                     }
 
+                    if (frames != 0 && bytes != 0) {
+                        drmp3_uint64 totalBytes = (pMP3->streamLength != DRMP3_UINT64_MAX) ? pMP3->streamLength : (drmp3_uint64)bytes;
+                        pMP3->averageBitrate = (drmp3_uint32)((totalBytes * 8 * (drmp3_uint64)firstFrameInfo.sample_rate) / ((drmp3_uint64)frames * (drmp3_uint64)firstFramePCMFrameCount));
+                    }
+
                     /* Post the raw data of the tag to the metadata callback. */
                     if (onMeta != NULL) {
                         drmp3_metadata_type metadataType = isXing ? DRMP3_METADATA_TYPE_XING : DRMP3_METADATA_TYPE_VBRI;
@@ -3420,10 +3493,11 @@ static drmp3_bool32 drmp3_init_internal(drmp3* pMP3, drmp3_read_proc onRead, drm
                     drmp3dec_init(&pMP3->decoder);
                 }
 
-                done_xing_info:;
+                }
             } else {
                 /* Failed to read the side info. */
             }
+            done_xing_info:;
         }
         #endif
     } else {
