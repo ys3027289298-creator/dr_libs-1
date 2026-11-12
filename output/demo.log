@@ -1,0 +1,7 @@
+generated: album_gain_peak.mp3, mixed_case.mp3, track_gain.mp3, no_tag.mp3
+compilation clean (no warnings)
+edge cases passed: null/empty/truncated ignored, utf-16 gain=-2
+/home/ys/feedback/uidreczz28YlnC6LGF9/tests/gain/album_gain_peak.mp3 decode_ok channels=1 rate=44100 pcm_frames=14976
+/home/ys/feedback/uidreczz28YlnC6LGF9/tests/gain/mixed_case.mp3 decode_ok channels=1 rate=44100 pcm_frames=14976
+/home/ys/feedback/uidreczz28YlnC6LGF9/tests/gain/no_tag.mp3 decode_ok channels=1 rate=44100 pcm_frames=14976
+/home/ys/feedback/uidreczz28YlnC6LGF9/tests/gain/track_gain.mp3 decode_ok channels=1 rate=44100 pcm_frames=14976

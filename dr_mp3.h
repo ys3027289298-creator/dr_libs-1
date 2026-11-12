@@ -580,6 +580,36 @@ Frees any memory that was allocated by a public drmp3 API.
 */
 DRMP3_API void drmp3_free(void* p, const drmp3_allocation_callbacks* pAllocationCallbacks);
 
+/*
+Replay Gain values parsed from ID3v2 TXXX frames.
+
+The gain values are in dB and the peak values are linear amplitudes in the range 0..1. A value of 0 with hasValue
+set to false means no valid value was found for that field. Use this data for loudness normalization when transcoding.
+*/
+typedef struct
+{
+    drmp3_bool32 hasTrackGain;
+    float trackGainDB;
+    drmp3_bool32 hasTrackPeak;
+    float trackPeak;
+    drmp3_bool32 hasAlbumGain;
+    float albumGainDB;
+    drmp3_bool32 hasAlbumPeak;
+    float albumPeak;
+} drmp3_replaygain;
+
+/*
+Parses Replay Gain fields out of the TXXX frames of an ID3v2 tag.
+
+pID3v2Data [in]  The raw ID3v2 tag as delivered by the metadata callback, including the 10 byte header.
+id3v2Size  [in]  The size of the raw ID3v2 tag, in bytes.
+pReplayGain [out] Receives the parsed values. Fields without a valid value are left zeroed and their has* flags cleared.
+
+Returns DRMP3_TRUE if at least one Replay Gain field was parsed. Malformed fields are skipped, and data that is not an
+ID3v2 tag simply produces an all-zero result, so this never affects decoding.
+*/
+DRMP3_API drmp3_bool32 drmp3_parse_replaygain_id3v2(const void* pID3v2Data, size_t id3v2Size, drmp3_replaygain* pReplayGain);
+
 #ifdef __cplusplus
 }
 #endif
@@ -3450,6 +3480,318 @@ DRMP3_API drmp3_bool32 drmp3_init(drmp3* pMP3, drmp3_read_proc onRead, drmp3_see
 
     DRMP3_ZERO_OBJECT(pMP3);
     return drmp3_init_internal(pMP3, onRead, onSeek, onTell, onMeta, pUserData, pUserData, pAllocationCallbacks);
+}
+
+
+/* Copies one ID3v2 text field into a bounded ASCII buffer. The encoding is given explicitly (0..3) and pField points
+   directly at the field bytes, excluding the encoding marker and any null terminator. Non-ASCII becomes '?'. */
+static void drmp3__replaygain_flatten_text(drmp3_uint8 encoding, const drmp3_uint8* pField, size_t fieldSize,
+                                           char* pTextOut, size_t textCapacity)
+{
+    size_t i = 0;
+    size_t out = 0;
+
+    if (textCapacity == 0) {
+        return;
+    }
+
+    pTextOut[0] = '\0';
+
+    if (encoding == 1 || encoding == 2) {
+        /* UTF-16. Replay Gain text is ASCII, so a zero high byte means the low byte is the character. */
+        while (i + 1 < fieldSize && out + 1 < textCapacity) {
+            pTextOut[out++] = (pField[i+1] == 0 && pField[i] >= 0x20) ? (char)pField[i] : '?';
+            i += 2;
+        }
+    } else {
+        /* ISO-8859-1 (0), UTF-8 (3) or unknown. Replay Gain text is ASCII so a byte-wise copy works. */
+        while (i < fieldSize && out + 1 < textCapacity) {
+            pTextOut[out++] = (char)pField[i++];
+        }
+    }
+
+    pTextOut[out] = '\0';
+}
+
+static drmp3_bool32 drmp3__replaygain_parse_float(const char* pText, size_t textLength, float* pValueOut)
+{
+    char buffer[128];
+    double value;
+    char* pEnd;
+    size_t i = 0;
+    size_t length = (textLength < sizeof(buffer) - 1) ? textLength : (sizeof(buffer) - 1);
+
+    while (i < length && (pText[i] == ' ' || pText[i] == '\t')) {
+        i++;
+    }
+
+    if (i >= length) {
+        return DRMP3_FALSE;
+    }
+
+    DRMP3_COPY_MEMORY(buffer, pText + i, length - i);
+    buffer[length - i] = '\0';
+
+    value = strtod(buffer, &pEnd);
+    if (pEnd == buffer) {
+        return DRMP3_FALSE;  /* Not a number. */
+    }
+
+    *pValueOut = (float)value;
+    return DRMP3_TRUE;
+}
+
+/* Matches a Replay Gain field name case-insensitively, with or without a "replaygain_" / "replaygain " prefix. */
+static int drmp3__replaygain_match_field(const char* pName, size_t nameLength, const char* pCanonical)
+{
+    size_t canonicalLength = 0;
+    size_t i = 0;
+    size_t j;
+
+    while (pCanonical[canonicalLength]) {
+        canonicalLength++;
+    }
+
+    /* Skip an optional "replaygain" prefix followed by an underscore or whitespace. */
+    if (nameLength >= 10) {
+        const char* pPrefix = pName + i;
+        if ((pPrefix[0] == 'R' || pPrefix[0] == 'r') && (pPrefix[1] == 'E' || pPrefix[1] == 'e') &&
+            (pPrefix[2] == 'P' || pPrefix[2] == 'p') && (pPrefix[3] == 'L' || pPrefix[3] == 'l') &&
+            (pPrefix[4] == 'A' || pPrefix[4] == 'a') && (pPrefix[5] == 'Y' || pPrefix[5] == 'y') &&
+            (pPrefix[6] == 'G' || pPrefix[6] == 'g') && (pPrefix[7] == 'A' || pPrefix[7] == 'a') &&
+            (pPrefix[8] == 'I' || pPrefix[8] == 'i') && (pPrefix[9] == 'N' || pPrefix[9] == 'n')) {
+            i += 10;
+        }
+    }
+
+    /* Compare the remainder, treating '_', ' ' and '\t' as equivalent separators and ignoring case. */
+    for (j = 0; j < canonicalLength; j++) {
+        char b = pCanonical[j];
+
+        while (i < nameLength && (pName[i] == '_' || pName[i] == ' ' || pName[i] == '\t')) {
+            i++;
+        }
+
+        if (b == '_') {
+            /* A canonical separator consumes any input separator, which the loop above already skipped. */
+            continue;
+        }
+
+        if (i >= nameLength) {
+            return DRMP3_FALSE;
+        }
+
+        {
+            char a = pName[i++];
+
+            if (a >= 'A' && a <= 'Z') {
+                a = (char)(a - 'A' + 'a');
+            }
+
+            if (a != b) {
+                return DRMP3_FALSE;
+            }
+        }
+    }
+
+    while (i < nameLength && (pName[i] == ' ' || pName[i] == '\t')) {
+        i++;
+    }
+
+    return (i == nameLength) ? DRMP3_TRUE : DRMP3_FALSE;
+}
+
+static drmp3_bool32 drmp3__replaygain_field_matches(drmp3_replaygain* pReplayGain, const char* pName, size_t nameLength, const char* pValue, size_t valueLength)
+{
+    float value;
+
+    if (!drmp3__replaygain_parse_float(pValue, valueLength, &value)) {
+        return DRMP3_FALSE;  /* Malformed value: skip this field without touching the others. */
+    }
+
+    if (drmp3__replaygain_match_field(pName, nameLength, "track_gain")) {
+        pReplayGain->hasTrackGain = DRMP3_TRUE;
+        pReplayGain->trackGainDB  = value;
+    } else if (drmp3__replaygain_match_field(pName, nameLength, "track_peak")) {
+        pReplayGain->hasTrackPeak = DRMP3_TRUE;
+        pReplayGain->trackPeak    = value;
+    } else if (drmp3__replaygain_match_field(pName, nameLength, "album_gain")) {
+        pReplayGain->hasAlbumGain = DRMP3_TRUE;
+        pReplayGain->albumGainDB  = value;
+    } else if (drmp3__replaygain_match_field(pName, nameLength, "album_peak")) {
+        pReplayGain->hasAlbumPeak = DRMP3_TRUE;
+        pReplayGain->albumPeak    = value;
+    } else {
+        return DRMP3_FALSE;  /* Unrelated TXXX frame. */
+    }
+
+    return DRMP3_TRUE;
+}
+
+/* Handles one TXXX frame: "Description<NUL>Value", or a single string carrying an inline "Name: Value"/"Name=Value". */
+static drmp3_bool32 drmp3__replaygain_parse_txxx(const drmp3_uint8* pFrameData, size_t frameSize, drmp3_replaygain* pReplayGain)
+{
+    char description[256];
+    char value[256];
+    drmp3_uint8 encoding;
+    size_t descStart;
+    size_t descEnd;
+    size_t valueStart;
+    size_t separator = (size_t)-1;
+    size_t i;
+
+    if (frameSize < 2) {
+        return DRMP3_FALSE;
+    }
+
+    encoding = pFrameData[0];
+
+    if (encoding == 1 || encoding == 2) {
+        /* UTF-16: skip BOM if present, then the description ends at a two byte null. */
+        descStart = (frameSize >= 3 && ((pFrameData[1] == 0xFF && pFrameData[2] == 0xFE) ||
+                                        (pFrameData[1] == 0xFE && pFrameData[2] == 0xFF))) ? 3 : 1;
+
+        i = descStart;
+        while (i + 1 < frameSize && !(pFrameData[i] == 0 && pFrameData[i+1] == 0)) {
+            i += 2;
+        }
+
+        descEnd = i;
+        valueStart = (i + 2 <= frameSize) ? i + 2 : frameSize;
+    } else {
+        /* Single byte encoding (0 = ISO-8859-1, 3 = UTF-8). Byte 0 is the encoding marker; text begins at byte 1. */
+        descStart = 1;
+
+        i = descStart;
+        while (i < frameSize && pFrameData[i] != 0) {
+            i++;
+        }
+
+        descEnd = i;
+        valueStart = (i + 1 <= frameSize) ? i + 1 : frameSize;
+    }
+
+    drmp3__replaygain_flatten_text(encoding, pFrameData + descStart, descEnd - descStart, description, sizeof(description));
+    drmp3__replaygain_flatten_text(encoding, pFrameData + valueStart, frameSize - valueStart, value, sizeof(value));
+
+    for (i = 0; description[i] != '\0'; i++) {
+        if (description[i] == ':' || description[i] == '=') {
+            separator = i;
+            break;
+        }
+    }
+
+    if (separator != (size_t)-1) {
+        /* Inline form, e.g. "REPLAYGAIN_TRACK_GAIN: -3.5 dB" held entirely in the description. */
+        return drmp3__replaygain_field_matches(pReplayGain, description, separator, description + separator + 1,
+                                               strlen(description + separator + 1));
+    } else {
+        /* Standard TXXX form: description is the field name, value follows the internal null terminator. */
+        return drmp3__replaygain_field_matches(pReplayGain, description, strlen(description), value, strlen(value));
+    }
+}
+
+DRMP3_API drmp3_bool32 drmp3_parse_replaygain_id3v2(const void* pID3v2Data, size_t id3v2Size, drmp3_replaygain* pReplayGain)
+{
+    const drmp3_uint8* pTag;
+    size_t tagSize;
+    size_t cursor;
+    drmp3_bool32 foundAny = DRMP3_FALSE;
+
+    if (pReplayGain == NULL) {
+        return DRMP3_FALSE;
+    }
+
+    DRMP3_ZERO_OBJECT(pReplayGain);
+
+    if (pID3v2Data == NULL || id3v2Size < 10) {
+        return DRMP3_FALSE;  /* No tag: empty result, no error. */
+    }
+
+    pTag = (const drmp3_uint8*)pID3v2Data;
+    if (pTag[0] != 'I' || pTag[1] != 'D' || pTag[2] != '3') {
+        return DRMP3_FALSE;  /* Not an ID3v2 tag. */
+    }
+
+    tagSize = (((size_t)pTag[6] & 0x7F) << 21) |
+              (((size_t)pTag[7] & 0x7F) << 14) |
+              (((size_t)pTag[8] & 0x7F) << 7)  |
+              (((size_t)pTag[9] & 0x7F) << 0);
+
+    if (tagSize == 0 || 10 + tagSize > id3v2Size) {
+        return DRMP3_FALSE;  /* Truncated or empty tag. */
+    }
+
+    /* Skip the extended header in v2.3/v2.4 if present. */
+    cursor = 10;
+    if ((pTag[3] == 3 || pTag[3] == 4) && (pTag[5] & 0x40) && cursor + 4 <= 10 + tagSize) {
+        size_t extendedSize;
+
+        if (pTag[3] == 4) {
+            extendedSize = (((size_t)pTag[cursor] & 0x7F) << 21) |
+                           (((size_t)pTag[cursor+1] & 0x7F) << 14) |
+                           (((size_t)pTag[cursor+2] & 0x7F) << 7) |
+                           (((size_t)pTag[cursor+3] & 0x7F) << 0);
+        } else {
+            extendedSize = ((size_t)pTag[cursor] << 24) | ((size_t)pTag[cursor+1] << 16) |
+                           ((size_t)pTag[cursor+2] << 8) | (size_t)pTag[cursor+3];
+        }
+
+        if (extendedSize > 0 && cursor + extendedSize <= 10 + tagSize) {
+            cursor += extendedSize;
+        }
+    }
+
+    while (cursor < 10 + tagSize) {
+        drmp3_uint8 id0;
+        drmp3_uint8 id1;
+        drmp3_uint8 id2;
+        drmp3_uint8 id3;
+        size_t frameSize;
+        size_t frameHeaderSize;
+
+        if (pTag[cursor] == 0) {
+            break;  /* Padding. */
+        }
+
+        frameHeaderSize = (pTag[3] == 2) ? 6 : 10;
+        if (cursor + frameHeaderSize > 10 + tagSize) {
+            break;  /* Not enough room for even a frame header. */
+        }
+
+        id0 = pTag[cursor];
+        id1 = pTag[cursor+1];
+        id2 = pTag[cursor+2];
+        id3 = pTag[cursor+3];
+
+        if (pTag[3] == 2) {
+            /* v2.2: 3 byte frame ID, 3 byte size. */
+            frameSize = ((size_t)pTag[cursor+3] << 16) | ((size_t)pTag[cursor+4] << 8) | (size_t)pTag[cursor+5];
+        } else if (pTag[3] == 4) {
+            frameSize = (((size_t)pTag[cursor+4] & 0x7F) << 21) |
+                        (((size_t)pTag[cursor+5] & 0x7F) << 14) |
+                        (((size_t)pTag[cursor+6] & 0x7F) << 7) |
+                        (((size_t)pTag[cursor+7] & 0x7F) << 0);
+        } else {
+            frameSize = ((size_t)pTag[cursor+4] << 24) | ((size_t)pTag[cursor+5] << 16) |
+                        ((size_t)pTag[cursor+6] << 8) | (size_t)pTag[cursor+7];
+        }
+
+        if (frameSize == 0 || cursor + frameHeaderSize + frameSize > 10 + tagSize) {
+            break;  /* Malformed frame: stop scanning, everything parsed so far stays valid. */
+        }
+
+        if ((pTag[3] == 2 && id0 == 'T' && id1 == 'X' && id2 == 'X') ||
+            (pTag[3] != 2 && id0 == 'T' && id1 == 'X' && id2 == 'X' && id3 == 'X')) {
+            if (drmp3__replaygain_parse_txxx(pTag + cursor + frameHeaderSize, frameSize, pReplayGain)) {
+                foundAny = DRMP3_TRUE;
+            }
+        }
+
+        cursor += frameHeaderSize + frameSize;
+    }
+
+    return foundAny;
 }
 
 

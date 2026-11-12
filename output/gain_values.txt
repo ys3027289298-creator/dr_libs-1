@@ -1,0 +1,20 @@
+/home/ys/feedback/uidreczz28YlnC6LGF9/tests/gain/track_gain.mp3 (id3v2 tag: yes)
+  track gain  = -3.45
+  track peak  = (empty)
+  album gain  = (empty)
+  album peak  = (empty)
+/home/ys/feedback/uidreczz28YlnC6LGF9/tests/gain/album_gain_peak.mp3 (id3v2 tag: yes)
+  track gain  = (empty)
+  track peak  = (empty)
+  album gain  = 1.2
+  album peak  = 0.876543
+/home/ys/feedback/uidreczz28YlnC6LGF9/tests/gain/mixed_case.mp3 (id3v2 tag: yes)
+  track gain  = -7.5
+  track peak  = 0.555
+  album gain  = 2.25
+  album peak  = 0.998001
+/home/ys/feedback/uidreczz28YlnC6LGF9/tests/gain/no_tag.mp3 (id3v2 tag: no)
+  track gain  = (empty)
+  track peak  = (empty)
+  album gain  = (empty)
+  album peak  = (empty)
