@@ -1,0 +1,45 @@
+
+==================== 1. Build current and baseline dr_mp3 harnesses ====================
+
+
+==================== 2.1 mpeg25_8k_mono.mp3 ====================
+
+file       : mpeg25_8k_mono.mp3
+sample rate: 8000 Hz
+channels   : 1
+first 8    : 0 0 0 0 0 0 0 0
+frame count: 4
+RESULT: ok
+
+==================== 2.2 mpeg25_8k_stereo.mp3 ====================
+
+file       : mpeg25_8k_stereo.mp3
+sample rate: 8000 Hz
+channels   : 2
+first 8    : 0 0 0 0 0 0 0 0
+frame count: 4
+RESULT: ok
+
+==================== 2.3 mpeg25_11k_mono.mp3 ====================
+
+file       : mpeg25_11k_mono.mp3
+sample rate: 11025 Hz
+channels   : 1
+first 8    : 0 0 0 0 0 0 0 0
+frame count: 5
+RESULT: ok
+
+==================== 2.4 mpeg25_bad_samplerate.mp3 ====================
+
+frame count: 0
+RESULT: rejected as expected
+
+==================== 3. MPEG-1 regression (sample-identical vs baseline) ====================
+
+file       : regression_mpeg1_44k_mono.mp3
+sample rate: 44100 Hz
+channels   : 1
+first 8    : 0 0 0 0 0 0 0 0
+frame count: 6
+MPEG-1 regression: PASS (all samples identical vs git HEAD)
+

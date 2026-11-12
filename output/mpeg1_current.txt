@@ -1,0 +1,5 @@
+file       : regression_mpeg1_44k_mono.mp3
+sample rate: 44100 Hz
+channels   : 1
+first 8    : 0 0 0 0 0 0 0 0
+frame count: 6
