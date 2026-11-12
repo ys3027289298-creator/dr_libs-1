@@ -1,0 +1,15 @@
+file: output/f64_stereo.wav
+  sampleRate=44100 channels=2 frames=16 duration=0.000363s
+  first samples: -0.800000 -0.700000 -0.600000 -0.500000 -0.400000 -0.300000 -0.200000 -0.100000
+  maxError=0.000e+00 (ok)
+file: output/f64_mono.wav
+  sampleRate=44100 channels=1 frames=16 duration=0.000363s
+  first samples: -0.800000 -0.700000 -0.600000 -0.500000 -0.400000 -0.300000 -0.200000 -0.100000
+  maxError=0.000e+00 (ok)
+file: output/f64_odd_tail.wav
+  sampleRate=44100 channels=1 frames=16 duration=0.000363s
+  first samples: -0.800000 -0.700000 -0.600000 -0.500000 -0.400000 -0.300000 -0.200000 -0.100000
+  maxError=0.000e+00 (ok)
+file: output/f64_bad_header.wav
+  init failed (expected)
+RESULT: PASS
