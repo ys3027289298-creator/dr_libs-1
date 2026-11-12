@@ -1,0 +1,12 @@
+== stereo_44100 ==
+sample_rate=44100 channels=2 frames=6 bad_frames=0
+first8: 0 0 2 -3 1 -2 0 -1
+== mono_48000 ==
+sample_rate=48000 channels=1 frames=6 bad_frames=0
+first8: 0 -1 1 1 0 -1 -1 -1
+== joint_stereo ==
+sample_rate=44100 channels=2 frames=6 bad_frames=0
+first8: 0 0 2 0 1 1 -1 0
+== bad_frame ==
+sample_rate=44100 channels=2 frames=5 bad_frames=1
+first8: 0 0 2 -3 1 -2 0 -1
