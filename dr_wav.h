@@ -62,8 +62,9 @@ You can also read the raw bytes of audio data, which could be useful if dr_wav d
     size_t bytesRead = drwav_read_raw(&wav, bytesToRead, pRawDataBuffer);
     ```
 
-dr_wav can also be used to output WAV files. This does not currently support compressed formats. To use this, look at `drwav_init_write()`,
-`drwav_init_file_write()`, etc. Use `drwav_write_pcm_frames()` to write samples, or `drwav_write_raw()` to write raw data in the "data" chunk.
+dr_wav can also be used to output WAV files. PCM and IEEE float formats are written with `drwav_init_write()`,
+`drwav_init_file_write()`, etc. IMA ADPCM (DVI, format tag 0x0011) is written with `drwav_init_ima_adpcm_write()`
+and family. Use `drwav_write_pcm_frames()` to write samples, or `drwav_write_raw()` to write raw data in the "data" chunk.
 
     ```c
     drwav_data_format format;
@@ -953,6 +954,13 @@ typedef struct
         drwav_int32  stepIndex[2];
         drwav_int32  cachedFrames[16]; /* Samples are stored in this cache during decoding. */
         drwav_uint32 cachedFrameCount;
+
+        /* Encoder state. Only used when the object was opened with drwav_init_ima_adpcm_write() and family. */
+        drwav_bool8  isEncoder;
+        drwav_uint32 samplesInBlock;       /* Valid samples accumulated in the block currently being encoded. */
+        drwav_int16  blockSamples[2035];   /* Verbatim PCM samples accumulated for the block currently being encoded. */
+        drwav_uint8  nibbleBuffer[1017];   /* 4-bit difference nibbles for the block being encoded (low nibble first). */
+        drwav_uint32 nibbleBufferSize;     /* Number of bytes currently used in nibbleBuffer. */
     } ima;
 
     /* AIFF specific data. */
@@ -1021,6 +1029,17 @@ DRWAV_API drwav_bool32 drwav_init_write(drwav* pWav, const drwav_data_format* pF
 DRWAV_API drwav_bool32 drwav_init_write_sequential(drwav* pWav, const drwav_data_format* pFormat, drwav_uint64 totalSampleCount, drwav_write_proc onWrite, void* pUserData, const drwav_allocation_callbacks* pAllocationCallbacks);
 DRWAV_API drwav_bool32 drwav_init_write_sequential_pcm_frames(drwav* pWav, const drwav_data_format* pFormat, drwav_uint64 totalPCMFrameCount, drwav_write_proc onWrite, void* pUserData, const drwav_allocation_callbacks* pAllocationCallbacks);
 DRWAV_API drwav_bool32 drwav_init_write_with_metadata(drwav* pWav, const drwav_data_format* pFormat, drwav_write_proc onWrite, drwav_seek_proc onSeek, void* pUserData, const drwav_allocation_callbacks* pAllocationCallbacks, drwav_metadata* pMetadata, drwav_uint32 metadataCount);
+
+/*
+Initializes a writer which encodes PCM samples to IMA ADPCM (DVI, format tag 0x0011).
+
+The input samples passed to drwav_write_pcm_frames() must be signed 16-bit PCM. Only mono RIFF WAV files are
+supported. Each output block contains a 4 byte block header (first sample, step index, valid sample count)
+followed by 1017 bytes of 4-bit nibble data (2034 difference samples), for a block align of 1021 bytes and
+2035 samples per block. Partial blocks are zero padded.
+*/
+DRWAV_API drwav_bool32 drwav_init_ima_adpcm_write(drwav* pWav, const drwav_data_format* pFormat, drwav_write_proc onWrite, drwav_seek_proc onSeek, void* pUserData, const drwav_allocation_callbacks* pAllocationCallbacks);
+DRWAV_API drwav_bool32 drwav_init_ima_adpcm_write_sequential_pcm_frames(drwav* pWav, const drwav_data_format* pFormat, drwav_uint64 totalPCMFrameCount, drwav_write_proc onWrite, void* pUserData, const drwav_allocation_callbacks* pAllocationCallbacks);
 
 /*
 Utility function to determine the target size of the entire data to be written (including all headers and chunks).
@@ -1275,6 +1294,13 @@ the lifetime of the drwav object.
 
 The buffer should contain the contents of the entire wave file, not just the sample data.
 */
+
+/* Helpers for writing IMA ADPCM (DVI, format tag 0x0011) WAV files. See drwav_init_ima_adpcm_write(). */
+#ifndef DR_WAV_NO_STDIO
+DRWAV_API drwav_bool32 drwav_init_file_write_ima_adpcm(drwav* pWav, const char* filename, const drwav_data_format* pFormat, const drwav_allocation_callbacks* pAllocationCallbacks);
+DRWAV_API drwav_bool32 drwav_init_file_write_ima_adpcm_sequential_pcm_frames(drwav* pWav, const char* filename, const drwav_data_format* pFormat, drwav_uint64 totalPCMFrameCount, const drwav_allocation_callbacks* pAllocationCallbacks);
+#endif  /* DRWAV_NO_STDIO */
+
 DRWAV_API drwav_bool32 drwav_init_memory(drwav* pWav, const void* data, size_t dataSize, const drwav_allocation_callbacks* pAllocationCallbacks);
 DRWAV_API drwav_bool32 drwav_init_memory_ex(drwav* pWav, const void* data, size_t dataSize, drwav_chunk_proc onChunk, void* pChunkUserData, drwav_uint32 flags, const drwav_allocation_callbacks* pAllocationCallbacks);
 DRWAV_API drwav_bool32 drwav_init_memory_with_metadata(drwav* pWav, const void* data, size_t dataSize, drwav_uint32 flags, const drwav_allocation_callbacks* pAllocationCallbacks);
@@ -1290,6 +1316,9 @@ until after drwav_uninit() has been called.
 DRWAV_API drwav_bool32 drwav_init_memory_write(drwav* pWav, void** ppData, size_t* pDataSize, const drwav_data_format* pFormat, const drwav_allocation_callbacks* pAllocationCallbacks);
 DRWAV_API drwav_bool32 drwav_init_memory_write_sequential(drwav* pWav, void** ppData, size_t* pDataSize, const drwav_data_format* pFormat, drwav_uint64 totalSampleCount, const drwav_allocation_callbacks* pAllocationCallbacks);
 DRWAV_API drwav_bool32 drwav_init_memory_write_sequential_pcm_frames(drwav* pWav, void** ppData, size_t* pDataSize, const drwav_data_format* pFormat, drwav_uint64 totalPCMFrameCount, const drwav_allocation_callbacks* pAllocationCallbacks);
+
+DRWAV_API drwav_bool32 drwav_init_memory_write_ima_adpcm(drwav* pWav, void** ppData, size_t* pDataSize, const drwav_data_format* pFormat, const drwav_allocation_callbacks* pAllocationCallbacks);
+DRWAV_API drwav_bool32 drwav_init_memory_write_ima_adpcm_sequential_pcm_frames(drwav* pWav, void** ppData, size_t* pDataSize, const drwav_data_format* pFormat, drwav_uint64 totalPCMFrameCount, const drwav_allocation_callbacks* pAllocationCallbacks);
 
 
 #ifndef DR_WAV_NO_CONVERSION_API
@@ -1962,6 +1991,8 @@ DRWAV_PRIVATE unsigned int drwav_calculate_padding_size(drwav_container containe
 DRWAV_PRIVATE drwav_uint64 drwav_read_pcm_frames_s16__msadpcm(drwav* pWav, drwav_uint64 samplesToRead, drwav_int16* pBufferOut);
 DRWAV_PRIVATE drwav_uint64 drwav_read_pcm_frames_s16__ima(drwav* pWav, drwav_uint64 samplesToRead, drwav_int16* pBufferOut);
 DRWAV_PRIVATE drwav_bool32 drwav_init_write__internal(drwav* pWav, const drwav_data_format* pFormat, drwav_uint64 totalSampleCount);
+DRWAV_PRIVATE drwav_bool32 drwav__ima_flush_block(drwav* pWav);
+DRWAV_PRIVATE drwav_uint64 drwav_write_pcm_frames__ima_adpcm(drwav* pWav, drwav_uint64 framesToWrite, const drwav_int16* pSamples);
 
 DRWAV_PRIVATE drwav_result drwav__read_chunk_header(drwav_read_proc onRead, void* pUserData, drwav_container container, drwav_uint64* pRunningBytesReadOut, drwav_chunk_header* pHeaderOut)
 {
@@ -3999,22 +4030,27 @@ DRWAV_PRIVATE drwav_bool32 drwav_init__internal(drwav* pWav, drwav_chunk_proc on
             drwav_uint64 totalBlockHeaderSizeInBytes;
             drwav_uint64 blockCount = dataChunkSize / fmt.blockAlign;
 
-            /* Make sure any trailing partial block is accounted for. */
-            if ((blockCount * fmt.blockAlign) < dataChunkSize) {
-                blockCount += 1;
+            /* An empty data chunk is a valid IMA ADPCM stream with zero PCM frames. */
+            if (dataChunkSize == 0) {
+                pWav->totalPCMFrameCount = 0;
+            } else {
+                /* Make sure any trailing partial block is accounted for. */
+                if ((blockCount * fmt.blockAlign) < dataChunkSize) {
+                    blockCount += 1;
+                }
+
+                /* We decode two samples per byte. There will be blockCount headers in the data chunk. This is enough to know how to calculate the total PCM frame count. */
+                totalBlockHeaderSizeInBytes = blockCount * (4*fmt.channels);
+                if (totalBlockHeaderSizeInBytes >= dataChunkSize) {  /* <-- We'll be subtracting totalBlockHeaderSizeInBytes from dataChunkSize next so it must be validated. */
+                    drwav_free(pWav->pMetadata, &pWav->allocationCallbacks);
+                    return DRWAV_FALSE; /* Invalid file. */
+                }
+
+                pWav->totalPCMFrameCount = ((dataChunkSize - totalBlockHeaderSizeInBytes) * 2) / fmt.channels;
+
+                /* The header includes a decoded sample for each channel which acts as the initial predictor sample. */
+                pWav->totalPCMFrameCount += blockCount;
             }
-
-            /* We decode two samples per byte. There will be blockCount headers in the data chunk. This is enough to know how to calculate the total PCM frame count. */
-            totalBlockHeaderSizeInBytes = blockCount * (4*fmt.channels);
-            if (totalBlockHeaderSizeInBytes >= dataChunkSize) {  /* <-- We'll be subtracting totalBlockHeaderSizeInBytes from dataChunkSize next so it must be validated. */
-                drwav_free(pWav->pMetadata, &pWav->allocationCallbacks);
-                return DRWAV_FALSE; /* Invalid file. */
-            }
-
-            pWav->totalPCMFrameCount = ((dataChunkSize - totalBlockHeaderSizeInBytes) * 2) / fmt.channels;
-
-            /* The header includes a decoded sample for each channel which acts as the initial predictor sample. */
-            pWav->totalPCMFrameCount += blockCount;
         }
     }
 
@@ -4647,11 +4683,11 @@ DRWAV_PRIVATE drwav_bool32 drwav_preinit_write(drwav* pWav, const drwav_data_for
         return DRWAV_FALSE; /* <-- onSeek is required when in non-sequential mode. */
     }
 
-    /* Not currently supporting compressed formats. Will need to add support for the "fact" chunk before we enable this. */
+    /* Compressed formats are only writable through the dedicated IMA ADPCM entry points. */
     if (pFormat->format == DR_WAVE_FORMAT_EXTENSIBLE) {
         return DRWAV_FALSE;
     }
-    if (pFormat->format == DR_WAVE_FORMAT_ADPCM || pFormat->format == DR_WAVE_FORMAT_DVI_ADPCM) {
+    if (pFormat->format == DR_WAVE_FORMAT_ADPCM) {
         return DRWAV_FALSE;
     }
 
@@ -4668,9 +4704,19 @@ DRWAV_PRIVATE drwav_bool32 drwav_preinit_write(drwav* pWav, const drwav_data_for
     pWav->fmt.formatTag = (drwav_uint16)pFormat->format;
     pWav->fmt.channels = (drwav_uint16)pFormat->channels;
     pWav->fmt.sampleRate = pFormat->sampleRate;
-    pWav->fmt.avgBytesPerSec = (drwav_uint32)((pFormat->bitsPerSample * pFormat->sampleRate * pFormat->channels) / 8);
-    pWav->fmt.blockAlign = (drwav_uint16)((pFormat->channels * pFormat->bitsPerSample) / 8);
-    pWav->fmt.bitsPerSample = (drwav_uint16)pFormat->bitsPerSample;
+    if (pFormat->format == DR_WAVE_FORMAT_DVI_ADPCM) {
+        /* IMA ADPCM writer: 4-bit differences, 2035 samples per block (a 4 byte header plus 1017 data bytes). Mono only. */
+        if (pFormat->channels != 1) {
+            return DRWAV_FALSE;
+        }
+        pWav->fmt.bitsPerSample = 4;
+        pWav->fmt.blockAlign = 1021;
+        pWav->fmt.avgBytesPerSec = (drwav_uint32)(((drwav_uint64)pFormat->sampleRate * pWav->fmt.blockAlign) / 2035);
+    } else {
+        pWav->fmt.avgBytesPerSec = (drwav_uint32)((pFormat->bitsPerSample * pFormat->sampleRate * pFormat->channels) / 8);
+        pWav->fmt.blockAlign = (drwav_uint16)((pFormat->channels * pFormat->bitsPerSample) / 8);
+        pWav->fmt.bitsPerSample = (drwav_uint16)pFormat->bitsPerSample;
+    }
     pWav->fmt.extendedSize = 0;
     pWav->isSequentialWrite = isSequential;
 
@@ -4685,6 +4731,15 @@ DRWAV_PRIVATE drwav_bool32 drwav_init_write__internal(drwav* pWav, const drwav_d
     size_t runningPos = 0;
     drwav_uint64 initialDataChunkSize = 0;
     drwav_uint64 chunkSizeFMT;
+    drwav_bool32 isImaAdpcm = (pWav->ima.isEncoder != DRWAV_FALSE);
+
+    /* Compressed formats are only writable through the dedicated IMA ADPCM entry points. */
+    if (!isImaAdpcm && pFormat->format == DR_WAVE_FORMAT_DVI_ADPCM) {
+        return DRWAV_FALSE;
+    }
+    if (isImaAdpcm && pFormat->container != drwav_container_riff) {
+        return DRWAV_FALSE; /* IMA ADPCM writing is only supported with the RIFF container. */
+    }
 
     /*
     The initial values for the "RIFF" and "data" chunks depends on whether or not we are initializing in sequential mode or not. In
@@ -4692,7 +4747,13 @@ DRWAV_PRIVATE drwav_bool32 drwav_init_write__internal(drwav* pWav, const drwav_d
     sequential mode we initialize it all to zero and fill it out in drwav_uninit() using a backwards seek.
     */
     if (pWav->isSequentialWrite) {
-        initialDataChunkSize = (totalSampleCount * pWav->fmt.bitsPerSample) / 8;
+        if (isImaAdpcm) {
+            /* Blocks are padded out to a full block align, so the data size depends on the number of blocks. */
+            drwav_uint64 blockCount = (totalSampleCount + 2034) / 2035;
+            initialDataChunkSize = blockCount * pWav->fmt.blockAlign;
+        } else {
+            initialDataChunkSize = (totalSampleCount * pWav->fmt.bitsPerSample) / 8;
+        }
 
         /*
         The RIFF container has a limit on the number of samples. drwav is not allowing this. There's no practical limits for Wave64
@@ -4831,6 +4892,44 @@ DRWAV_API drwav_bool32 drwav_init_write_with_metadata(drwav* pWav, const drwav_d
     pWav->metadataCount = metadataCount;
 
     return drwav_init_write__internal(pWav, pFormat, 0);
+}
+
+DRWAV_API drwav_bool32 drwav_init_ima_adpcm_write(drwav* pWav, const drwav_data_format* pFormat, drwav_write_proc onWrite, drwav_seek_proc onSeek, void* pUserData, const drwav_allocation_callbacks* pAllocationCallbacks)
+{
+    drwav_data_format adpcmFormat;
+
+    if (pWav == NULL || pFormat == NULL) {
+        return DRWAV_FALSE;
+    }
+
+    adpcmFormat = *pFormat;
+    adpcmFormat.format = DR_WAVE_FORMAT_DVI_ADPCM;
+
+    if (!drwav_preinit_write(pWav, &adpcmFormat, DRWAV_FALSE, onWrite, onSeek, pUserData, pAllocationCallbacks)) {
+        return DRWAV_FALSE;
+    }
+
+    pWav->ima.isEncoder = DRWAV_TRUE;
+    return drwav_init_write__internal(pWav, &adpcmFormat, 0);
+}
+
+DRWAV_API drwav_bool32 drwav_init_ima_adpcm_write_sequential_pcm_frames(drwav* pWav, const drwav_data_format* pFormat, drwav_uint64 totalPCMFrameCount, drwav_write_proc onWrite, void* pUserData, const drwav_allocation_callbacks* pAllocationCallbacks)
+{
+    drwav_data_format adpcmFormat;
+
+    if (pWav == NULL || pFormat == NULL) {
+        return DRWAV_FALSE;
+    }
+
+    adpcmFormat = *pFormat;
+    adpcmFormat.format = DR_WAVE_FORMAT_DVI_ADPCM;
+
+    if (!drwav_preinit_write(pWav, &adpcmFormat, DRWAV_TRUE, onWrite, NULL, pUserData, pAllocationCallbacks)) {
+        return DRWAV_FALSE;
+    }
+
+    pWav->ima.isEncoder = DRWAV_TRUE;
+    return drwav_init_write__internal(pWav, &adpcmFormat, totalPCMFrameCount);
 }
 
 
@@ -5612,6 +5711,26 @@ DRWAV_API drwav_bool32 drwav_init_file_write_sequential_pcm_frames(drwav* pWav, 
     return drwav_init_file_write_sequential(pWav, filename, pFormat, totalPCMFrameCount*pFormat->channels, pAllocationCallbacks);
 }
 
+DRWAV_API drwav_bool32 drwav_init_file_write_ima_adpcm(drwav* pWav, const char* filename, const drwav_data_format* pFormat, const drwav_allocation_callbacks* pAllocationCallbacks)
+{
+    FILE* pFile;
+    if (pWav == NULL || pFormat == NULL || drwav_fopen(&pFile, filename, "wb") != DRWAV_SUCCESS) {
+        return DRWAV_FALSE;
+    }
+
+    return drwav_init_ima_adpcm_write(pWav, pFormat, drwav__on_write_stdio, drwav__on_seek_stdio, (void*)pFile, pAllocationCallbacks);
+}
+
+DRWAV_API drwav_bool32 drwav_init_file_write_ima_adpcm_sequential_pcm_frames(drwav* pWav, const char* filename, const drwav_data_format* pFormat, drwav_uint64 totalPCMFrameCount, const drwav_allocation_callbacks* pAllocationCallbacks)
+{
+    FILE* pFile;
+    if (pWav == NULL || pFormat == NULL || drwav_fopen(&pFile, filename, "wb") != DRWAV_SUCCESS) {
+        return DRWAV_FALSE;
+    }
+
+    return drwav_init_ima_adpcm_write_sequential_pcm_frames(pWav, pFormat, totalPCMFrameCount, drwav__on_write_stdio, (void*)pFile, pAllocationCallbacks);
+}
+
 #ifndef DR_WAV_NO_WCHAR
 DRWAV_API drwav_bool32 drwav_init_file_write_w(drwav* pWav, const wchar_t* filename, const drwav_data_format* pFormat, const drwav_allocation_callbacks* pAllocationCallbacks)
 {
@@ -5852,6 +5971,44 @@ DRWAV_API drwav_bool32 drwav_init_memory_write_sequential_pcm_frames(drwav* pWav
     return drwav_init_memory_write_sequential(pWav, ppData, pDataSize, pFormat, totalPCMFrameCount*pFormat->channels, pAllocationCallbacks);
 }
 
+DRWAV_PRIVATE drwav_bool32 drwav_init_memory_write_ima_adpcm__internal(drwav* pWav, void** ppData, size_t* pDataSize, const drwav_data_format* pFormat, drwav_uint64 totalPCMFrameCount, drwav_bool32 isSequential, const drwav_allocation_callbacks* pAllocationCallbacks)
+{
+    drwav_data_format adpcmFormat;
+
+    if (ppData == NULL || pDataSize == NULL || pFormat == NULL) {
+        return DRWAV_FALSE;
+    }
+
+    *ppData = NULL; /* Important because we're using realloc()! */
+    *pDataSize = 0;
+
+    adpcmFormat = *pFormat;
+    adpcmFormat.format = DR_WAVE_FORMAT_DVI_ADPCM;
+
+    if (!drwav_preinit_write(pWav, &adpcmFormat, isSequential, drwav__on_write_memory, drwav__on_seek_memory_write, pWav, pAllocationCallbacks)) {
+        return DRWAV_FALSE;
+    }
+
+    pWav->memoryStreamWrite.ppData = ppData;
+    pWav->memoryStreamWrite.pDataSize = pDataSize;
+    pWav->memoryStreamWrite.dataSize = 0;
+    pWav->memoryStreamWrite.dataCapacity = 0;
+    pWav->memoryStreamWrite.currentWritePos = 0;
+
+    pWav->ima.isEncoder = DRWAV_TRUE;
+    return drwav_init_write__internal(pWav, &adpcmFormat, totalPCMFrameCount);
+}
+
+DRWAV_API drwav_bool32 drwav_init_memory_write_ima_adpcm(drwav* pWav, void** ppData, size_t* pDataSize, const drwav_data_format* pFormat, const drwav_allocation_callbacks* pAllocationCallbacks)
+{
+    return drwav_init_memory_write_ima_adpcm__internal(pWav, ppData, pDataSize, pFormat, 0, DRWAV_FALSE, pAllocationCallbacks);
+}
+
+DRWAV_API drwav_bool32 drwav_init_memory_write_ima_adpcm_sequential_pcm_frames(drwav* pWav, void** ppData, size_t* pDataSize, const drwav_data_format* pFormat, drwav_uint64 totalPCMFrameCount, const drwav_allocation_callbacks* pAllocationCallbacks)
+{
+    return drwav_init_memory_write_ima_adpcm__internal(pWav, ppData, pDataSize, pFormat, totalPCMFrameCount, DRWAV_TRUE, pAllocationCallbacks);
+}
+
 DRWAV_PRIVATE drwav_uint32 drwav_write_padding(drwav* pWav)
 {
     /* Do not adjust pWav->dataChunkDataSize - this should not include the padding. */
@@ -5929,12 +6086,23 @@ DRWAV_API drwav_result drwav_uninit(drwav* pWav)
             Padding will not have been written in `drwav_write_*()` in sequential mode so we'll want to
             do it explicitly here.
             */
+            if (pWav->ima.isEncoder != DRWAV_FALSE) {
+                drwav__ima_flush_block(pWav);
+            }
             drwav_write_padding(pWav);
 
             /* Validation for sequential mode. */
             if (pWav->dataChunkDataSize != pWav->dataChunkDataSizeTargetWrite) {
                 result = DRWAV_INVALID_FILE;
             }
+        } else if (pWav->ima.isEncoder != DRWAV_FALSE) {
+            if (!drwav__ima_flush_block(pWav)) {
+                result = DRWAV_INVALID_FILE;
+            }
+
+            /* Non-sequential mode: finalize the chunk sizes now that the last block has been flushed. */
+            drwav_write_padding(pWav);
+            drwav_write_chunk_sizes(pWav);
         }
     } else {
         drwav_free(pWav->pMetadata, &pWav->allocationCallbacks);
@@ -6338,6 +6506,10 @@ DRWAV_API drwav_uint64 drwav_write_pcm_frames_le(drwav* pWav, drwav_uint64 frame
         return 0;
     }
 
+    if (pWav->ima.isEncoder != DRWAV_FALSE) {
+        return drwav_write_pcm_frames__ima_adpcm(pWav, framesToWrite, (const drwav_int16*)pData);
+    }
+
     bytesToWrite = ((framesToWrite * pWav->channels * pWav->bitsPerSample) / 8);
     if (bytesToWrite > DRWAV_SIZE_MAX) {
         return 0;
@@ -6375,6 +6547,37 @@ DRWAV_API drwav_uint64 drwav_write_pcm_frames_be(drwav* pWav, drwav_uint64 frame
 
     if (pWav == NULL || framesToWrite == 0 || pData == NULL) {
         return 0;
+    }
+
+    if (pWav->ima.isEncoder != DRWAV_FALSE) {
+        /* The encoder expects native-endian samples. Convert each big-endian s16 input sample in place of raw byte swapping. */
+        drwav_int16 temp[1024];
+        drwav_uint64 framesRemaining = framesToWrite;
+        const drwav_int16* pRunningSamples = (const drwav_int16*)pData;
+
+        while (framesRemaining > 0) {
+            drwav_uint64 framesThisIteration = framesRemaining;
+            drwav_uint64 framesJustWritten;
+            drwav_uint32 i;
+
+            if (framesThisIteration > drwav_countof(temp)) {
+                framesThisIteration = drwav_countof(temp);
+            }
+
+            for (i = 0; i < framesThisIteration; ++i) {
+                temp[i] = drwav__bswap_s16(pRunningSamples[i]);
+            }
+
+            framesJustWritten = drwav_write_pcm_frames__ima_adpcm(pWav, framesThisIteration, temp);
+            if (framesJustWritten == 0) {
+                break;
+            }
+
+            framesRemaining -= framesJustWritten;
+            pRunningSamples += framesJustWritten;
+        }
+
+        return framesToWrite - framesRemaining;
     }
 
     bytesToWrite = ((framesToWrite * pWav->channels * pWav->bitsPerSample) / 8);
@@ -6745,13 +6948,22 @@ DRWAV_PRIVATE drwav_uint64 drwav_read_pcm_frames_s16__ima(drwav* pWav, drwav_uin
                 for (iChannel = 0; iChannel < pWav->channels; ++iChannel) {
                     drwav_uint32 iByte;
                     drwav_uint8 nibbles[4];
-                    if (pWav->onRead(pWav->pUserData, &nibbles, 4) != 4) {
+                    drwav_uint32 bytesToRead = (pWav->ima.bytesRemainingInBlock < 4) ? pWav->ima.bytesRemainingInBlock : 4;
+
+                    /* A block's final group can hold fewer than 4 bytes (an odd nibble-byte count, such as 1017 for a 1021 byte block). Read only what remains so the next block header stays aligned. */
+                    nibbles[0] = 0; nibbles[1] = 0; nibbles[2] = 0; nibbles[3] = 0;
+                    if (pWav->onRead(pWav->pUserData, &nibbles, bytesToRead) != bytesToRead) {
                         pWav->ima.cachedFrameCount = 0;
                         return totalFramesRead;
                     }
-                    pWav->ima.bytesRemainingInBlock -= 4;
+                    pWav->ima.bytesRemainingInBlock -= bytesToRead;
 
-                    for (iByte = 0; iByte < 4; ++iByte) {
+                    if (bytesToRead < 4) {
+                        /* Partial final group: only the bytes actually present hold real samples (2 samples per byte). */
+                        pWav->ima.cachedFrameCount = bytesToRead * 2;
+                    }
+
+                    for (iByte = 0; iByte < bytesToRead; ++iByte) {
                         drwav_uint8 nibble0 = ((nibbles[iByte] & 0x0F) >> 0);
                         drwav_uint8 nibble1 = ((nibbles[iByte] & 0xF0) >> 4);
 
@@ -6792,6 +7004,165 @@ DRWAV_PRIVATE drwav_uint64 drwav_read_pcm_frames_s16__ima(drwav* pWav, drwav_uin
     return totalFramesRead;
 }
 
+
+#define DRWAV_IMA_ADPCM_SAMPLES_PER_BLOCK  2035
+#define DRWAV_IMA_ADPCM_NIBBLE_BYTES       1017
+#define DRWAV_IMA_ADPCM_BLOCK_ALIGN        (4 + DRWAV_IMA_ADPCM_NIBBLE_BYTES)
+
+static const drwav_int32 drwav__ima_index_table[16] = {
+    -1, -1, -1, -1, 2, 4, 6, 8,
+    -1, -1, -1, -1, 2, 4, 6, 8
+};
+
+static const drwav_int32 drwav__ima_step_table[89] = {
+    7,     8,     9,     10,    11,    12,    13,    14,    16,    17,
+    19,    21,    23,    25,    28,    31,    34,    37,    41,    45,
+    50,    55,    60,    66,    73,    80,    88,    97,    107,   118,
+    130,   143,   157,   173,   190,   209,   230,   253,   279,   307,
+    337,   371,   408,   449,   494,   544,   598,   658,   724,   796,
+    876,   963,   1060,  1166,  1282,  1411,  1552,  1707,  1878,  2066,
+    2272,  2499,  2749,  3024,  3327,  3660,  4026,  4428,  4871,  5358,
+    5894,  6484,  7132,  7845,  8630,  9493,  10442, 11487, 12635, 13899,
+    15289, 16818, 18500, 20350, 22385, 24623, 27086, 29794, 32767
+};
+
+/* Encodes one difference sample into a 4-bit nibble and advances the predictor/step index. */
+DRWAV_PRIVATE drwav_uint8 drwav__ima_encode_nibble(drwav_int32 sample, drwav_int32* pPredictor, drwav_int32* pStepIndex)
+{
+    drwav_int32 step = drwav__ima_step_table[*pStepIndex];
+    drwav_int32 diff = sample - *pPredictor;
+    drwav_int32 nibble = 0;
+    drwav_int32 vpdiff = step >> 3;
+    drwav_int32 i;
+
+    if (diff < 0) {
+        nibble = 8;
+        diff = -diff;
+    }
+
+    for (i = 0; i < 3; ++i) {
+        drwav_int32 mask = (drwav_int32)(4 >> i);
+        drwav_int32 stepPart = step >> i;
+        if (diff >= stepPart) {
+            nibble |= mask;
+            vpdiff += stepPart;
+        }
+    }
+
+    if (nibble & 8) {
+        *pPredictor -= vpdiff;
+    } else {
+        *pPredictor += vpdiff;
+    }
+    *pPredictor = drwav_clamp(*pPredictor, -32768, 32767);
+    *pStepIndex = drwav_clamp(*pStepIndex + drwav__ima_index_table[nibble & 0x0F], 0, (drwav_int32)drwav_countof(drwav__ima_step_table)-1);
+
+    return (drwav_uint8)(nibble & 0x0F);
+}
+
+/* Picks the smallest step table index whose maximum representable difference covers the largest jump in the block. */
+DRWAV_PRIVATE drwav_int32 drwav__ima_pick_initial_step_index(const drwav_int16* pSamples, drwav_uint32 sampleCount)
+{
+    drwav_int32 maxDifference = 0;
+    drwav_int32 stepIndex;
+    drwav_uint32 i;
+
+    for (i = 1; i < sampleCount; ++i) {
+        drwav_int32 difference = (drwav_int32)pSamples[i] - (drwav_int32)pSamples[i - 1];
+        if (difference < 0) {
+            difference = -difference;
+        }
+        if (difference > maxDifference) {
+            maxDifference = difference;
+        }
+    }
+
+    /* The largest difference a nibble can represent at a given step is step*1 + step/2 + step/4 + step/8 + step/8 = step*2 - 1. */
+    for (stepIndex = 0; stepIndex < (drwav_int32)drwav_countof(drwav__ima_step_table); ++stepIndex) {
+        if ((drwav__ima_step_table[stepIndex] * 2 - 1) >= maxDifference) {
+            return stepIndex;
+        }
+    }
+
+    return (drwav_int32)drwav_countof(drwav__ima_step_table) - 1;
+}
+
+/* Writes the block currently held in the encoder state, zero padding any unused nibble bytes. */
+DRWAV_PRIVATE drwav_bool32 drwav__ima_flush_block(drwav* pWav)
+{
+    drwav_uint8 header[4];
+    drwav_int16 firstSample;
+    drwav_int32 predictor;
+    drwav_int32 stepIndex;
+    drwav_uint32 sampleCount = pWav->ima.samplesInBlock;
+    drwav_uint32 i;
+
+    if (sampleCount == 0) {
+        return DRWAV_TRUE;
+    }
+
+    firstSample = pWav->ima.blockSamples[0];
+    predictor = (drwav_int32)firstSample;
+    stepIndex = drwav__ima_pick_initial_step_index(pWav->ima.blockSamples, sampleCount);
+    {
+        drwav_uint8 initialStepIndex = (drwav_uint8)stepIndex;
+
+        /* Encode every sample after the first into a 4-bit difference nibble. */
+        pWav->ima.nibbleBufferSize = 0;
+        for (i = 1; i < sampleCount; ++i) {
+            drwav_uint8 nibble = drwav__ima_encode_nibble(pWav->ima.blockSamples[i], &predictor, &stepIndex);
+            drwav_uint32 nibbleIndex = i - 1;
+
+            /* Low nibble holds the first difference sample of each nibble byte. */
+            if ((nibbleIndex & 1) == 0) {
+                pWav->ima.nibbleBuffer[pWav->ima.nibbleBufferSize] = nibble;
+                pWav->ima.nibbleBufferSize += 1;
+            } else {
+                pWav->ima.nibbleBuffer[pWav->ima.nibbleBufferSize - 1] |= (drwav_uint8)(nibble << 4);
+            }
+        }
+
+        /* Block header: first sample as-is (16-bit LE), initial step index, valid sample count. */
+        header[0] = (drwav_uint8)((drwav_uint16)firstSample & 0xFF);
+        header[1] = (drwav_uint8)(((drwav_uint16)firstSample >> 8) & 0xFF);
+        header[2] = initialStepIndex;
+        header[3] = (drwav_uint8)((sampleCount > 255) ? 255 : sampleCount);
+    }
+
+    if (drwav_write_raw(pWav, sizeof(header), header) != sizeof(header)) {
+        return DRWAV_FALSE;
+    }
+
+    for (i = pWav->ima.nibbleBufferSize; i < DRWAV_IMA_ADPCM_NIBBLE_BYTES; ++i) {
+        pWav->ima.nibbleBuffer[i] = 0;
+    }
+    if (drwav_write_raw(pWav, DRWAV_IMA_ADPCM_NIBBLE_BYTES, pWav->ima.nibbleBuffer) != DRWAV_IMA_ADPCM_NIBBLE_BYTES) {
+        return DRWAV_FALSE;
+    }
+
+    pWav->ima.samplesInBlock = 0;
+    pWav->ima.nibbleBufferSize = 0;
+    return DRWAV_TRUE;
+}
+
+DRWAV_PRIVATE drwav_uint64 drwav_write_pcm_frames__ima_adpcm(drwav* pWav, drwav_uint64 framesToWrite, const drwav_int16* pSamples)
+{
+    drwav_uint64 framesWritten = 0;
+
+    while (framesWritten < framesToWrite) {
+        pWav->ima.blockSamples[pWav->ima.samplesInBlock] = pSamples[framesWritten];
+        pWav->ima.samplesInBlock += 1;
+        framesWritten += 1;
+
+        if (pWav->ima.samplesInBlock == DRWAV_IMA_ADPCM_SAMPLES_PER_BLOCK) {
+            if (!drwav__ima_flush_block(pWav)) {
+                return framesWritten;
+            }
+        }
+    }
+
+    return framesWritten;
+}
 
 #ifndef DR_WAV_NO_CONVERSION_API
 static const unsigned short g_drwavAlawTable[256] = {
