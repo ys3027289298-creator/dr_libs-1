@@ -1,0 +1,24 @@
+--- stereo44100 ---
+file=/home/ys/feedback/uidreczz28YiQAsYJGm/tests/layer2/stereo44100.mp2 sample_rate=44100Hz channels=2
+frames=4 bad_frames=0 first_8_samples=0.000000 0.000000 0.000000 0.000000 0.000000 0.000000 0.000000 0.000000
+reference_samples=9216 compared=9216 max_error=0.00003114
+result=PASS
+
+--- mono48000 ---
+file=/home/ys/feedback/uidreczz28YiQAsYJGm/tests/layer2/mono48000.mp2 sample_rate=48000Hz channels=1
+frames=5 bad_frames=0 first_8_samples=0.000000 0.000000 0.000000 0.000000 0.000000 0.000000 0.000000 0.000000
+reference_samples=5760 compared=5760 max_error=0.00003212
+result=PASS
+
+--- joint_stereo ---
+file=/home/ys/feedback/uidreczz28YiQAsYJGm/tests/layer2/joint_stereo.mp2 sample_rate=44100Hz channels=2
+frames=3 bad_frames=0 first_8_samples=0.000000 0.000000 0.000002 0.000002 0.000002 0.000002 0.000002 0.000002
+reference_samples=6912 compared=6912 max_error=0.00002992
+result=PASS
+
+--- corrupt_frame ---
+file=/home/ys/feedback/uidreczz28YiQAsYJGm/tests/layer2/corrupt_frame.mp2 sample_rate=44100Hz channels=2
+frames=3 bad_frames=1 first_8_samples=0.000000 0.000000 0.000000 0.000000 0.000000 0.000000 0.000000 0.000000
+reference_samples=9216 compared=6912 max_error=0.00003040
+result=PASS
+

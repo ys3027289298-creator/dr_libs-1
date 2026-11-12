@@ -3286,7 +3286,10 @@ static drmp3_bool32 drmp3_init_internal(drmp3* pMP3, drmp3_read_proc onRead, drm
                 drmp3_bs_get_bits(&bs, 16); /* CRC. */
             }
 
-            if (drmp3_L3_read_side_info(&bs, grInfo, pFirstFrameData) >= 0) {
+            /* Xing/Info tags are only ever carried in Layer III frames. Layer I/II frames use an unrelated
+            bitstream layout, so running the Layer III side info parser over them is meaningless (it can only
+            produce false matches) and must be skipped here. */
+            if (firstFrameInfo.layer == 3 && drmp3_L3_read_side_info(&bs, grInfo, pFirstFrameData) >= 0) {
                 drmp3_bool32 isXing = DRMP3_FALSE;
                 drmp3_bool32 isInfo = DRMP3_FALSE;
                 const drmp3_uint8* pTagData;
