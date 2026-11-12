@@ -79,7 +79,8 @@ dr_wav can also be used to output WAV files. This does not currently support com
     drwav_uint64 framesWritten = drwav_write_pcm_frames(pWav, frameCount, pSamples);
     ```
 
-Note that writing to AIFF or RIFX is not supported.
+Note that writing to RIFX is not supported. Writing to AIFF is supported via `drwav_init_write_aiff()`,
+`drwav_init_file_write_aiff()`, `drwav_write_pcm_frames_aiff()` and `drwav_uninit_aiff()`.
 
 dr_wav has support for decoding from a number of different encapsulation formats. See below for details.
 
@@ -106,7 +107,8 @@ Supported Encapsulations
 - RF64
 - W64
 
-Note that AIFF and RIFX do not support write mode, nor do they support reading of metadata.
+Note that RIFX does not support write mode, and neither AIFF nor RIFX support reading of metadata. AIFF supports
+write mode via the `drwav_*_aiff()` APIs mentioned above.
 
 
 Supported Encodings
@@ -1023,6 +1025,18 @@ DRWAV_API drwav_bool32 drwav_init_write_sequential_pcm_frames(drwav* pWav, const
 DRWAV_API drwav_bool32 drwav_init_write_with_metadata(drwav* pWav, const drwav_data_format* pFormat, drwav_write_proc onWrite, drwav_seek_proc onSeek, void* pUserData, const drwav_allocation_callbacks* pAllocationCallbacks, drwav_metadata* pMetadata, drwav_uint32 metadataCount);
 
 /*
+Initializes a writer for the AIFF encapsulation (FORM/AIFF with COMM and SSND chunks).
+
+This is the AIFF equivalent of drwav_init_write(). The container field of pFormat is ignored and forced to
+drwav_container_aiff. Samples are always stored big-endian; use drwav_write_pcm_frames_aiff() to write samples
+from native-endian buffers. Chunk sizes and the COMM frame count are patched by drwav_uninit_aiff(), which
+must be used in place of drwav_uninit() to close the writer.
+
+See also: drwav_init_file_write_aiff(), drwav_write_pcm_frames_aiff(), drwav_uninit_aiff()
+*/
+DRWAV_API drwav_bool32 drwav_init_write_aiff(drwav* pWav, const drwav_data_format* pFormat, drwav_write_proc onWrite, drwav_seek_proc onSeek, void* pUserData, const drwav_allocation_callbacks* pAllocationCallbacks);
+
+/*
 Utility function to determine the target size of the entire data to be written (including all headers and chunks).
 
 Returns the target size in bytes.
@@ -1123,6 +1137,21 @@ little-endian. Use drwav_write_raw() to write raw audio data without performing 
 DRWAV_API drwav_uint64 drwav_write_pcm_frames(drwav* pWav, drwav_uint64 framesToWrite, const void* pData);
 DRWAV_API drwav_uint64 drwav_write_pcm_frames_le(drwav* pWav, drwav_uint64 framesToWrite, const void* pData);
 DRWAV_API drwav_uint64 drwav_write_pcm_frames_be(drwav* pWav, drwav_uint64 framesToWrite, const void* pData);
+
+/*
+Writes PCM frames to an AIFF writer initialized with drwav_init_write_aiff() or drwav_init_file_write_aiff().
+
+Input samples are in native-endian byte order and are converted to big-endian as required by the AIFF format.
+Returns the number of PCM frames written.
+*/
+DRWAV_API drwav_uint64 drwav_write_pcm_frames_aiff(drwav* pWav, drwav_uint64 framesToWrite, const void* pData);
+
+/*
+Finalizes an AIFF writer. Patches the FORM and SSND chunk sizes and the COMM frame count, then closes the
+writer like drwav_uninit(). Use this in place of drwav_uninit() for objects initialized with
+drwav_init_write_aiff() or drwav_init_file_write_aiff().
+*/
+DRWAV_API drwav_result drwav_uninit_aiff(drwav* pWav);
 
 /* Conversion Utilities */
 #ifndef DR_WAV_NO_CONVERSION_API
@@ -1260,6 +1289,7 @@ objects because the operating system may restrict the number of file handles an 
 any given time.
 */
 DRWAV_API drwav_bool32 drwav_init_file_write(drwav* pWav, const char* filename, const drwav_data_format* pFormat, const drwav_allocation_callbacks* pAllocationCallbacks);
+DRWAV_API drwav_bool32 drwav_init_file_write_aiff(drwav* pWav, const char* filename, const drwav_data_format* pFormat, const drwav_allocation_callbacks* pAllocationCallbacks);
 DRWAV_API drwav_bool32 drwav_init_file_write_sequential(drwav* pWav, const char* filename, const drwav_data_format* pFormat, drwav_uint64 totalSampleCount, const drwav_allocation_callbacks* pAllocationCallbacks);
 DRWAV_API drwav_bool32 drwav_init_file_write_sequential_pcm_frames(drwav* pWav, const char* filename, const drwav_data_format* pFormat, drwav_uint64 totalPCMFrameCount, const drwav_allocation_callbacks* pAllocationCallbacks);
 DRWAV_API drwav_bool32 drwav_init_file_write_w(drwav* pWav, const wchar_t* filename, const drwav_data_format* pFormat, const drwav_allocation_callbacks* pAllocationCallbacks);
@@ -1954,6 +1984,8 @@ DRWAV_PRIVATE unsigned int drwav_calculate_padding_size(drwav_container containe
 {
     if (container == drwav_container_riff || container == drwav_container_rf64) {
         return drwav__chunk_padding_size_riff(chunkSize);
+    } else if (container == drwav_container_aiff) {
+        return drwav__chunk_padding_size_riff(chunkSize);   /* AIFF chunks are padded to even sizes, like RIFF. */
     } else {
         return drwav__chunk_padding_size_w64(chunkSize);
     }
@@ -4122,6 +4154,60 @@ DRWAV_PRIVATE size_t drwav__write_u64ne_to_le(drwav* pWav, drwav_uint64 value)
     return drwav__write(pWav, &value, 8);
 }
 
+DRWAV_PRIVATE size_t drwav__write_u16ne_to_be(drwav* pWav, drwav_uint16 value)
+{
+    DRWAV_ASSERT(pWav          != NULL);
+    DRWAV_ASSERT(pWav->onWrite != NULL);
+
+    if (drwav__is_little_endian()) {
+        value = drwav__bswap16(value);
+    }
+
+    return drwav__write(pWav, &value, 2);
+}
+
+DRWAV_PRIVATE size_t drwav__write_u32ne_to_be(drwav* pWav, drwav_uint32 value)
+{
+    DRWAV_ASSERT(pWav          != NULL);
+    DRWAV_ASSERT(pWav->onWrite != NULL);
+
+    if (drwav__is_little_endian()) {
+        value = drwav__bswap32(value);
+    }
+
+    return drwav__write(pWav, &value, 4);
+}
+
+DRWAV_PRIVATE size_t drwav__write_aiff_extended(drwav* pWav, drwav_uint64 value)
+{
+    /* Writes a positive integer as an 80-bit IEEE 754 extended precision float, as used by the AIFF COMM chunk. */
+    drwav_uint8 bytes[10];
+    drwav_uint32 exponent = 16383 + 63;
+    drwav_uint64 significand = value;
+
+    if (value == 0) {
+        exponent = 0;
+    } else {
+        while ((significand & 0x8000000000000000ULL) == 0) {
+            significand <<= 1;
+            exponent -= 1;
+        }
+    }
+
+    bytes[0] = (drwav_uint8)(exponent >> 8);
+    bytes[1] = (drwav_uint8)(exponent >> 0);
+    bytes[2] = (drwav_uint8)(significand >> 56);
+    bytes[3] = (drwav_uint8)(significand >> 48);
+    bytes[4] = (drwav_uint8)(significand >> 40);
+    bytes[5] = (drwav_uint8)(significand >> 32);
+    bytes[6] = (drwav_uint8)(significand >> 24);
+    bytes[7] = (drwav_uint8)(significand >> 16);
+    bytes[8] = (drwav_uint8)(significand >>  8);
+    bytes[9] = (drwav_uint8)(significand >>  0);
+
+    return drwav__write(pWav, bytes, sizeof(bytes));
+}
+
 DRWAV_PRIVATE size_t drwav__write_f32ne_to_le(drwav* pWav, float value)
 {
     union {
@@ -4831,6 +4917,50 @@ DRWAV_API drwav_bool32 drwav_init_write_with_metadata(drwav* pWav, const drwav_d
     pWav->metadataCount = metadataCount;
 
     return drwav_init_write__internal(pWav, pFormat, 0);
+}
+
+DRWAV_API drwav_bool32 drwav_init_write_aiff(drwav* pWav, const drwav_data_format* pFormat, drwav_write_proc onWrite, drwav_seek_proc onSeek, void* pUserData, const drwav_allocation_callbacks* pAllocationCallbacks)
+{
+    size_t runningPos = 0;
+
+    if (!drwav_preinit_write(pWav, pFormat, DRWAV_FALSE, onWrite, onSeek, pUserData, pAllocationCallbacks)) {
+        return DRWAV_FALSE;
+    }
+
+    /*
+    The sizes of the "FORM" and "SSND" chunks and the frame count in the "COMM" chunk are initialized to
+    zero and filled out in drwav_uninit_aiff() using a backwards seek.
+    */
+
+    /* "FORM" chunk. */
+    runningPos += drwav__write(pWav, "FORM", 4);
+    runningPos += drwav__write_u32ne_to_be(pWav, 0);                        /* Size of FORM. Set to true value in drwav_uninit_aiff(). */
+    runningPos += drwav__write(pWav, "AIFF", 4);
+
+    /* "COMM" chunk. */
+    runningPos += drwav__write(pWav, "COMM", 4);
+    runningPos += drwav__write_u32ne_to_be(pWav, 18);                       /* Size of COMM. Always 18 for plain AIFF (no compression type). */
+    runningPos += drwav__write_u16ne_to_be(pWav, pWav->fmt.channels);
+    runningPos += drwav__write_u32ne_to_be(pWav, 0);                        /* Frame count. Set to true value in drwav_uninit_aiff(). */
+    runningPos += drwav__write_u16ne_to_be(pWav, pWav->fmt.bitsPerSample);
+    runningPos += drwav__write_aiff_extended(pWav, pWav->fmt.sampleRate);   /* 80-bit extended precision sample rate. */
+
+    /* "SSND" chunk. The offset and blockSize fields are always set to 0 as per the specification. */
+    runningPos += drwav__write(pWav, "SSND", 4);
+    runningPos += drwav__write_u32ne_to_be(pWav, 0);                        /* Size of SSND. Set to true value in drwav_uninit_aiff(). */
+    runningPos += drwav__write_u32ne_to_be(pWav, 0);                        /* offset. */
+    runningPos += drwav__write_u32ne_to_be(pWav, 0);                        /* blockSize. */
+
+    /* Set some properties for the client's convenience. */
+    pWav->container = drwav_container_aiff;
+    pWav->channels = (drwav_uint16)pFormat->channels;
+    pWav->sampleRate = pFormat->sampleRate;
+    pWav->bitsPerSample = (drwav_uint16)pFormat->bitsPerSample;
+    pWav->translatedFormatTag = (drwav_uint16)pFormat->format;
+    pWav->dataChunkDataPos = runningPos;
+    pWav->dataChunkDataSizeTargetWrite = 0;
+
+    return DRWAV_TRUE;
 }
 
 
@@ -5598,6 +5728,22 @@ DRWAV_API drwav_bool32 drwav_init_file_write(drwav* pWav, const char* filename, 
     return drwav_init_file_write__internal(pWav, filename, pFormat, 0, DRWAV_FALSE, pAllocationCallbacks);
 }
 
+DRWAV_API drwav_bool32 drwav_init_file_write_aiff(drwav* pWav, const char* filename, const drwav_data_format* pFormat, const drwav_allocation_callbacks* pAllocationCallbacks)
+{
+    FILE* pFile;
+    if (drwav_fopen(&pFile, filename, "wb") != DRWAV_SUCCESS) {
+        return DRWAV_FALSE;
+    }
+
+    /* This takes ownership of the FILE* object. */
+    if (!drwav_init_write_aiff(pWav, pFormat, drwav__on_write_stdio, drwav__on_seek_stdio, (void*)pFile, pAllocationCallbacks)) {
+        fclose(pFile);
+        return DRWAV_FALSE;
+    }
+
+    return DRWAV_TRUE;
+}
+
 DRWAV_API drwav_bool32 drwav_init_file_write_sequential(drwav* pWav, const char* filename, const drwav_data_format* pFormat, drwav_uint64 totalSampleCount, const drwav_allocation_callbacks* pAllocationCallbacks)
 {
     return drwav_init_file_write__internal(pWav, filename, pFormat, totalSampleCount, DRWAV_TRUE, pAllocationCallbacks);
@@ -5951,6 +6097,36 @@ DRWAV_API drwav_result drwav_uninit(drwav* pWav)
 #endif
 
     return result;
+}
+
+DRWAV_API drwav_result drwav_uninit_aiff(drwav* pWav)
+{
+    if (pWav == NULL) {
+        return DRWAV_INVALID_ARGS;
+    }
+
+    if (pWav->onWrite != NULL && pWav->onSeek != NULL) {
+        drwav_uint64 dataSize = pWav->dataChunkDataSize;
+        drwav_uint32 padding = drwav_calculate_padding_size(drwav_container_aiff, dataSize);
+        drwav_uint32 blockAlign = (pWav->fmt.blockAlign != 0) ? pWav->fmt.blockAlign : 1;
+
+        /* The "FORM" chunk size. */
+        if (pWav->onSeek(pWav->pUserData, 4, DRWAV_SEEK_SET)) {
+            drwav__write_u32ne_to_be(pWav, (drwav_uint32)(46 + dataSize + padding));  /* 46 = "AIFF" + [sizeof "COMM" chunk] + [SSND chunk header]. */
+        }
+
+        /* The "COMM" frame count. */
+        if (pWav->onSeek(pWav->pUserData, 22, DRWAV_SEEK_SET)) {
+            drwav__write_u32ne_to_be(pWav, (drwav_uint32)(dataSize / blockAlign));
+        }
+
+        /* The "SSND" chunk size. Includes the offset and blockSize fields, but not the padding. */
+        if (pWav->onSeek(pWav->pUserData, 42, DRWAV_SEEK_SET)) {
+            drwav__write_u32ne_to_be(pWav, (drwav_uint32)(8 + dataSize));
+        }
+    }
+
+    return drwav_uninit(pWav);
 }
 
 
@@ -6432,6 +6608,69 @@ DRWAV_API drwav_uint64 drwav_write_pcm_frames(drwav* pWav, drwav_uint64 framesTo
     } else {
         return drwav_write_pcm_frames_be(pWav, framesToWrite, pData);
     }
+}
+
+DRWAV_API drwav_uint64 drwav_write_pcm_frames_aiff(drwav* pWav, drwav_uint64 framesToWrite, const void* pData)
+{
+    drwav_uint64 bytesToWrite;
+    drwav_uint64 bytesWritten;
+    drwav_uint32 bytesPerSample;
+    const drwav_uint8* pRunningData;
+
+    if (pWav == NULL || framesToWrite == 0 || pData == NULL) {
+        return 0;
+    }
+
+    bytesToWrite = ((framesToWrite * pWav->channels * pWav->bitsPerSample) / 8);
+    if (bytesToWrite > DRWAV_SIZE_MAX) {
+        return 0;
+    }
+
+    if (!drwav__is_little_endian()) {
+        return drwav_write_pcm_frames_le(pWav, framesToWrite, pData);   /* The host is already big-endian. No conversion necessary. */
+    }
+
+    bytesWritten = 0;
+    pRunningData = (const drwav_uint8*)pData;
+
+    bytesPerSample = drwav_get_bytes_per_pcm_frame(pWav) / pWav->channels;
+    if (bytesPerSample == 0) {
+        return 0;   /* Cannot determine bytes per sample, or bytes per sample is less than one byte. */
+    }
+
+    while (bytesToWrite > 0) {
+        drwav_uint8 temp[4096];
+        drwav_uint32 sampleCount;
+        size_t bytesJustWritten;
+        drwav_uint64 bytesToWriteThisIteration;
+
+        bytesToWriteThisIteration = bytesToWrite;
+        DRWAV_ASSERT(bytesToWriteThisIteration <= DRWAV_SIZE_MAX);  /* <-- This is checked above. */
+
+        /*
+        AIFF files are always big-endian. We need to byte swap on little-endian architectures. Since our input buffer is read-only we need
+        to use an intermediary buffer for the conversion.
+        */
+        sampleCount = sizeof(temp)/bytesPerSample;
+
+        if (bytesToWriteThisIteration > ((drwav_uint64)sampleCount)*bytesPerSample) {
+            bytesToWriteThisIteration = ((drwav_uint64)sampleCount)*bytesPerSample;
+        }
+
+        DRWAV_COPY_MEMORY(temp, pRunningData, (size_t)bytesToWriteThisIteration);
+        drwav__bswap_samples(temp, sampleCount, bytesPerSample);
+
+        bytesJustWritten = drwav_write_raw(pWav, (size_t)bytesToWriteThisIteration, temp);
+        if (bytesJustWritten == 0) {
+            break;
+        }
+
+        bytesToWrite -= bytesJustWritten;
+        bytesWritten += bytesJustWritten;
+        pRunningData += bytesJustWritten;
+    }
+
+    return (bytesWritten * 8) / pWav->bitsPerSample / pWav->channels;
 }
 
 

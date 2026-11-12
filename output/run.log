@@ -1,0 +1,39 @@
+
+===== 阶段 1: 导出改动前 dr_wav.h 作为 WAV 回归基准 =====
+
+===== 阶段 2: 编译 AIFF 生成器 =====
+
+===== 阶段 3: 生成 单声道16位 AIFF =====
+
+===== 阶段 4: 生成 立体声24位 AIFF =====
+
+===== 阶段 5: 生成 立体声32位浮点 AIFF =====
+
+===== 阶段 6: 生成 0帧空 AIFF =====
+
+===== 阶段 7: Python aifc 读回校验 =====
+output/mono16.aiff: ch=1 bits=16 frames=512 rate=44100 first8_diff=[0, 0, 0, 0, 0, 0, 0, 0] [OK]
+output/stereo24.aiff: ch=2 bits=24 frames=512 rate=44100 first8_diff=[0, 0, 0, 0, 0, 0, 0, 0] [OK]
+output/stereo32f.aiff: ch=2 bits=32 frames=512 rate=44100 first8_diff=[0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0] [OK]
+output/empty.aiff: ch=1 bits=16 frames=0 rate=44100 first8_diff=[] [OK]
+ALL OK
+
+===== 阶段 8: 编译 WAV 回归写入器（原版与新版头文件） =====
+
+===== 阶段 9: WAV 输出逐字节对比 =====
+WAV 输出逐字节一致
+
+===== 阶段 10: 汇总 =====
+total 632
+-rw-r--r-- 1 ys ys 348779 Nov 12 18:20 dr_wav_orig.h
+-rw-r--r-- 1 ys ys     54 Nov 12 18:20 empty.aiff
+-rwxr-xr-x 1 ys ys  89968 Nov 12 18:20 gen_aiff
+-rw-r--r-- 1 ys ys   1078 Nov 12 18:20 mono16.aiff
+-rw-r--r-- 1 ys ys    556 Nov 12 18:20 reg_new.wav
+-rw-r--r-- 1 ys ys    556 Nov 12 18:20 reg_old.wav
+-rw-r--r-- 1 ys ys    941 Nov 12 18:20 run.log
+-rw-r--r-- 1 ys ys   3126 Nov 12 18:20 stereo24.aiff
+-rw-r--r-- 1 ys ys   4150 Nov 12 18:20 stereo32f.aiff
+-rwxr-xr-x 1 ys ys  85840 Nov 12 18:20 wav_gen_new
+-rwxr-xr-x 1 ys ys  85456 Nov 12 18:20 wav_gen_old
+全部阶段完成
