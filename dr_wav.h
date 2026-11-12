@@ -620,6 +620,30 @@ typedef struct
 } drwav_smpl;
 
 /*
+Loop Points for Writing
+
+A simplified representation of a sampler loop for use with drwav_init_write_with_loops() and
+drwav_init_file_write_with_loops(). These APIs write an "smpl" chunk with the remaining fields
+filled in with standard defaults (manufacturer/product = 0, sample period derived from the sample
+rate, MIDI unity note = 60, infinite forward loops).
+*/
+#ifndef DRWAV_MAX_SMPL_LOOPS
+#define DRWAV_MAX_SMPL_LOOPS      16
+#endif
+
+typedef struct
+{
+    /* The offset of the first sample to be played in the loop. */
+    drwav_uint32 firstSampleOffset;
+
+    /* The offset into the audio data of the last sample to be played in the loop. */
+    drwav_uint32 lastSampleOffset;
+
+    /* See drwav_smpl_loop_type. */
+    drwav_uint32 type;
+} drwav_loop_point;
+
+/*
 Instrument Metadata
 
 The inst metadata contains data about how a sound should be played as part of an instrument. This
@@ -928,6 +952,9 @@ typedef struct
     drwav_metadata* pMetadata;
     drwav_uint32 metadataCount;
 
+    /* Set to DRWAV_TRUE when pMetadata was allocated by dr_wav itself in write mode (see drwav_init_write_with_loops()) and must be freed in drwav_uninit(). */
+    drwav_bool32 isOwnedMetadata;
+
 
     /* A hack to avoid a DRWAV_MALLOC() when opening a decoder with drwav_init_memory(). */
     drwav__memory_stream memoryStream;
@@ -1021,6 +1048,14 @@ DRWAV_API drwav_bool32 drwav_init_write(drwav* pWav, const drwav_data_format* pF
 DRWAV_API drwav_bool32 drwav_init_write_sequential(drwav* pWav, const drwav_data_format* pFormat, drwav_uint64 totalSampleCount, drwav_write_proc onWrite, void* pUserData, const drwav_allocation_callbacks* pAllocationCallbacks);
 DRWAV_API drwav_bool32 drwav_init_write_sequential_pcm_frames(drwav* pWav, const drwav_data_format* pFormat, drwav_uint64 totalPCMFrameCount, drwav_write_proc onWrite, void* pUserData, const drwav_allocation_callbacks* pAllocationCallbacks);
 DRWAV_API drwav_bool32 drwav_init_write_with_metadata(drwav* pWav, const drwav_data_format* pFormat, drwav_write_proc onWrite, drwav_seek_proc onSeek, void* pUserData, const drwav_allocation_callbacks* pAllocationCallbacks, drwav_metadata* pMetadata, drwav_uint32 metadataCount);
+
+/*
+Same as drwav_init_write(), but also writes an "smpl" chunk built from the given loop points.
+
+Passing NULL or a loop count of 0 results in output identical to drwav_init_write(). Returns
+DRWAV_FALSE if the loop count exceeds DRWAV_MAX_SMPL_LOOPS.
+*/
+DRWAV_API drwav_bool32 drwav_init_write_with_loops(drwav* pWav, const drwav_data_format* pFormat, const drwav_loop_point* pLoops, drwav_uint32 loopCount, drwav_write_proc onWrite, drwav_seek_proc onSeek, void* pUserData, const drwav_allocation_callbacks* pAllocationCallbacks);
 
 /*
 Utility function to determine the target size of the entire data to be written (including all headers and chunks).
@@ -1260,6 +1295,7 @@ objects because the operating system may restrict the number of file handles an 
 any given time.
 */
 DRWAV_API drwav_bool32 drwav_init_file_write(drwav* pWav, const char* filename, const drwav_data_format* pFormat, const drwav_allocation_callbacks* pAllocationCallbacks);
+DRWAV_API drwav_bool32 drwav_init_file_write_with_loops(drwav* pWav, const char* filename, const drwav_data_format* pFormat, const drwav_loop_point* pLoops, drwav_uint32 loopCount, const drwav_allocation_callbacks* pAllocationCallbacks);
 DRWAV_API drwav_bool32 drwav_init_file_write_sequential(drwav* pWav, const char* filename, const drwav_data_format* pFormat, drwav_uint64 totalSampleCount, const drwav_allocation_callbacks* pAllocationCallbacks);
 DRWAV_API drwav_bool32 drwav_init_file_write_sequential_pcm_frames(drwav* pWav, const char* filename, const drwav_data_format* pFormat, drwav_uint64 totalPCMFrameCount, const drwav_allocation_callbacks* pAllocationCallbacks);
 DRWAV_API drwav_bool32 drwav_init_file_write_w(drwav* pWav, const wchar_t* filename, const drwav_data_format* pFormat, const drwav_allocation_callbacks* pAllocationCallbacks);
@@ -4833,6 +4869,70 @@ DRWAV_API drwav_bool32 drwav_init_write_with_metadata(drwav* pWav, const drwav_d
     return drwav_init_write__internal(pWav, pFormat, 0);
 }
 
+DRWAV_API drwav_bool32 drwav_init_write_with_loops(drwav* pWav, const drwav_data_format* pFormat, const drwav_loop_point* pLoops, drwav_uint32 loopCount, drwav_write_proc onWrite, drwav_seek_proc onSeek, void* pUserData, const drwav_allocation_callbacks* pAllocationCallbacks)
+{
+    drwav_metadata* pMetadata;
+    drwav_smpl_loop* pSmplLoops;
+    drwav_uint32 iLoop;
+    drwav_bool32 result;
+
+    if (pLoops == NULL || loopCount == 0) {
+        return drwav_init_write(pWav, pFormat, onWrite, onSeek, pUserData, pAllocationCallbacks);
+    }
+
+    if (loopCount > DRWAV_MAX_SMPL_LOOPS || pFormat == NULL || pFormat->sampleRate == 0) {
+        return DRWAV_FALSE;
+    }
+
+    if (!drwav_preinit_write(pWav, pFormat, DRWAV_FALSE, onWrite, onSeek, pUserData, pAllocationCallbacks)) {
+        return DRWAV_FALSE;
+    }
+
+    /* The metadata must stay valid until drwav_uninit(), so it cannot live on the stack. */
+    pMetadata = (drwav_metadata*)drwav__malloc_from_callbacks(sizeof(drwav_metadata) + sizeof(drwav_smpl_loop) * loopCount, &pWav->allocationCallbacks);
+    if (pMetadata == NULL) {
+        return DRWAV_FALSE;
+    }
+    pSmplLoops = (drwav_smpl_loop*)(pMetadata + 1);
+
+    DRWAV_ZERO_OBJECT(pMetadata);
+    pMetadata->type                                     = drwav_metadata_type_smpl;
+    pMetadata->data.smpl.manufacturerId                 = 0;
+    pMetadata->data.smpl.productId                      = 0;
+    pMetadata->data.smpl.samplePeriodNanoseconds        = (drwav_uint32)(1000000000ULL / pFormat->sampleRate);
+    pMetadata->data.smpl.midiUnityNote                  = 60;
+    pMetadata->data.smpl.midiPitchFraction              = 0;
+    pMetadata->data.smpl.smpteFormat                    = 0;
+    pMetadata->data.smpl.smpteOffset                    = 0;
+    pMetadata->data.smpl.sampleLoopCount                = loopCount;
+    pMetadata->data.smpl.samplerSpecificDataSizeInBytes = 0;
+    pMetadata->data.smpl.pLoops                         = pSmplLoops;
+    pMetadata->data.smpl.pSamplerSpecificData           = NULL;
+
+    for (iLoop = 0; iLoop < loopCount; ++iLoop) {
+        pSmplLoops[iLoop].cuePointId        = iLoop;
+        pSmplLoops[iLoop].type              = pLoops[iLoop].type;
+        pSmplLoops[iLoop].firstSampleOffset = pLoops[iLoop].firstSampleOffset;
+        pSmplLoops[iLoop].lastSampleOffset  = pLoops[iLoop].lastSampleOffset;
+        pSmplLoops[iLoop].sampleFraction    = 0;
+        pSmplLoops[iLoop].playCount         = 0;
+    }
+
+    pWav->pMetadata       = pMetadata;
+    pWav->metadataCount   = 1;
+    pWav->isOwnedMetadata = DRWAV_TRUE;
+
+    result = drwav_init_write__internal(pWav, pFormat, 0);
+    if (result != DRWAV_TRUE) {
+        drwav__free_from_callbacks(pMetadata, &pWav->allocationCallbacks);
+        pWav->pMetadata       = NULL;
+        pWav->metadataCount   = 0;
+        pWav->isOwnedMetadata = DRWAV_FALSE;
+    }
+
+    return result;
+}
+
 
 DRWAV_API drwav_uint64 drwav_target_write_size_bytes(const drwav_data_format* pFormat, drwav_uint64 totalFrameCount, drwav_metadata* pMetadata, drwav_uint32 metadataCount)
 {
@@ -5598,6 +5698,24 @@ DRWAV_API drwav_bool32 drwav_init_file_write(drwav* pWav, const char* filename, 
     return drwav_init_file_write__internal(pWav, filename, pFormat, 0, DRWAV_FALSE, pAllocationCallbacks);
 }
 
+DRWAV_API drwav_bool32 drwav_init_file_write_with_loops(drwav* pWav, const char* filename, const drwav_data_format* pFormat, const drwav_loop_point* pLoops, drwav_uint32 loopCount, const drwav_allocation_callbacks* pAllocationCallbacks)
+{
+    FILE* pFile;
+    drwav_bool32 result;
+
+    if (drwav_fopen(&pFile, filename, "wb") != DRWAV_SUCCESS) {
+        return DRWAV_FALSE;
+    }
+
+    /* This takes ownership of the FILE* object. */
+    result = drwav_init_write_with_loops(pWav, pFormat, pLoops, loopCount, drwav__on_write_stdio, drwav__on_seek_stdio, (void*)pFile, pAllocationCallbacks);
+    if (result != DRWAV_TRUE) {
+        fclose(pFile);
+    }
+
+    return result;
+}
+
 DRWAV_API drwav_bool32 drwav_init_file_write_sequential(drwav* pWav, const char* filename, const drwav_data_format* pFormat, drwav_uint64 totalSampleCount, const drwav_allocation_callbacks* pAllocationCallbacks)
 {
     return drwav_init_file_write__internal(pWav, filename, pFormat, totalSampleCount, DRWAV_TRUE, pAllocationCallbacks);
@@ -5935,6 +6053,13 @@ DRWAV_API drwav_result drwav_uninit(drwav* pWav)
             if (pWav->dataChunkDataSize != pWav->dataChunkDataSizeTargetWrite) {
                 result = DRWAV_INVALID_FILE;
             }
+        }
+
+        if (pWav->isOwnedMetadata) {
+            drwav__free_from_callbacks(pWav->pMetadata, &pWav->allocationCallbacks);
+            pWav->pMetadata       = NULL;
+            pWav->metadataCount   = 0;
+            pWav->isOwnedMetadata = DRWAV_FALSE;
         }
     } else {
         drwav_free(pWav->pMetadata, &pWav->allocationCallbacks);

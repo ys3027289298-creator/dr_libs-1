@@ -1,0 +1,10 @@
+case=single loop=0 start=100 end=400
+case=single loops=1 match=yes
+case=dual loop=0 start=100 end=400
+case=dual loop=1 start=600 end=900
+case=dual loops=2 match=yes
+case=overflow write=rejected
+case=none loops=0 match=yes
+case=baseline written
+case=none byte_identical=yes
+matched_cases: 3
