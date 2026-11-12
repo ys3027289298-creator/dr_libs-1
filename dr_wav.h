@@ -1124,6 +1124,15 @@ DRWAV_API drwav_uint64 drwav_write_pcm_frames(drwav* pWav, drwav_uint64 framesTo
 DRWAV_API drwav_uint64 drwav_write_pcm_frames_le(drwav* pWav, drwav_uint64 framesToWrite, const void* pData);
 DRWAV_API drwav_uint64 drwav_write_pcm_frames_be(drwav* pWav, drwav_uint64 framesToWrite, const void* pData);
 
+/*
+Writes 32-bit IEEE floating point PCM frames.
+
+The writer must have been initialized with format set to DR_WAVE_FORMAT_IEEE_FLOAT and bitsPerSample set to 32.
+Input samples are native-endian floats and are written to the WAV file as little-endian IEEE 754 values. The
+samples are interleaved and may span any number of channels. Returns the number of PCM frames written.
+*/
+DRWAV_API drwav_uint64 drwav_write_pcm_frames_f32(drwav* pWav, drwav_uint64 framesToWrite, const float* pData);
+
 /* Conversion Utilities */
 #ifndef DR_WAV_NO_CONVERSION_API
 
@@ -6432,6 +6441,19 @@ DRWAV_API drwav_uint64 drwav_write_pcm_frames(drwav* pWav, drwav_uint64 framesTo
     } else {
         return drwav_write_pcm_frames_be(pWav, framesToWrite, pData);
     }
+}
+
+DRWAV_API drwav_uint64 drwav_write_pcm_frames_f32(drwav* pWav, drwav_uint64 framesToWrite, const float* pData)
+{
+    if (pWav == NULL || pData == NULL) {
+        return 0;
+    }
+
+    if (pWav->fmt.formatTag != DR_WAVE_FORMAT_IEEE_FLOAT || pWav->fmt.bitsPerSample != 32) {
+        return 0;   /* This entry point only writes 32-bit IEEE float samples. */
+    }
+
+    return drwav_write_pcm_frames(pWav, framesToWrite, pData);
 }
 
 
