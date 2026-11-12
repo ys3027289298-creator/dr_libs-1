@@ -208,6 +208,17 @@ typedef drmp3_int32 drmp3_result;
 #define DRMP3_MAX_PCM_FRAMES_PER_MP3_FRAME  1152
 #define DRMP3_MAX_SAMPLES_PER_FRAME         (DRMP3_MAX_PCM_FRAMES_PER_MP3_FRAME*2)
 
+/*
+Threshold below which a decoded sample is treated as digital silence by the gapless fallback estimator. The
+estimator is only used for files without a LAME tag; no encoder-specific sample count is assumed. The s16 value
+of 2 corresponds to roughly -84 dBFS, which keeps genuine codec ringing out of the measured silent region.
+*/
+#if defined(DR_MP3_FLOAT_OUTPUT)
+#define DRMP3_SILENCE_THRESHOLD             (2.0f/32767.0f)
+#else
+#define DRMP3_SILENCE_THRESHOLD             ((drmp3_int16)2)
+#endif
+
 /* Inline */
 #ifdef _MSC_VER
     #define DRMP3_INLINE __forceinline
@@ -401,6 +412,29 @@ typedef struct
     drmp3_uint32 sampleRate;
 } drmp3_config;
 
+/*
+Gapless playback information.
+
+A PCM frame is one sample for each channel. All frame counts below are per-channel PCM frame counts.
+
+hasLAMEInfo is DRMP3_TRUE when the delay and padding were read from a LAME tag inside the Xing/Info header. When
+DRMP3_FALSE no LAME tag was available and the delay and padding were estimated from the structure of the MP3
+frames and the decoded PCM data (leading/trailing digital silence), without using hardcoded encoder constants.
+
+delayInPCMFrames and paddingInPCMFrames are the number of PCM frames removed from the start and end of the raw
+decoded stream. totalPCMFrameCount is the number of PCM frames produced by decoding every MP3 frame, including the
+delay and padding. outputPCMFrameCount is the number of PCM frames actually emitted by drmp3_read_pcm_frames_*()
+after trimming, i.e. totalPCMFrameCount - delayInPCMFrames - paddingInPCMFrames.
+*/
+typedef struct
+{
+    drmp3_bool32 hasLAMEInfo;
+    drmp3_uint32 delayInPCMFrames;
+    drmp3_uint32 paddingInPCMFrames;
+    drmp3_uint64 totalPCMFrameCount;
+    drmp3_uint64 outputPCMFrameCount;
+} drmp3_gapless_info;
+
 typedef struct
 {
     drmp3dec decoder;
@@ -425,6 +459,7 @@ typedef struct
     drmp3_uint32 seekPointCount;        /* The number of items in pSeekPoints. When set to 0 assumes to no seek table. Defaults to zero. */
     drmp3_uint32 delayInPCMFrames;
     drmp3_uint32 paddingInPCMFrames;
+    drmp3_bool32 hasLAMEInfo;             /* DRMP3_TRUE when delay/padding come from a LAME tag. DRMP3_FALSE when they were estimated. */
     drmp3_uint32 mp3FramesSkipped;      /* MP3 frames without output skipped by the last decode. Internal use only. */
     drmp3_uint64 totalPCMFrameCount;    /* Set to DRMP3_UINT64_MAX if the length is unknown. Includes delay and padding. */
     drmp3_bool32 isVBR;
@@ -511,10 +546,31 @@ Note that this is _not_ an MP3 frame, but rather a PCM frame.
 DRMP3_API drmp3_bool32 drmp3_seek_to_pcm_frame(drmp3* pMP3, drmp3_uint64 frameIndex);
 
 /*
+Returns the index of the PCM frame that the next call to drmp3_read_pcm_frames_*() will return.
+
+The index is in the caller's trimmed output space: it starts at zero and never includes the encoder delay
+frames removed from the head of the stream. Useful for verifying seek positions without consuming samples.
+*/
+DRMP3_API drmp3_uint64 drmp3_get_cursor_pcm_frame(drmp3* pMP3);
+
+/*
 Calculates the total number of PCM frames in the MP3 stream. Cannot be used for infinite streams such as internet
 radio. Should be considered a hint. Unreliable for malformed streams. Runs in linear time. Returns 0 on error.
+
+The returned count is the number of PCM frames delivered to the caller after gapless trimming, i.e. it excludes the
+encoder delay and end padding. Use drmp3_get_gapless_info() to inspect the untrimmed and trimmed counts separately.
 */
 DRMP3_API drmp3_uint64 drmp3_get_pcm_frame_count(drmp3* pMP3);
+
+/*
+Retrieves gapless playback information.
+
+Reports the encoder delay removed from the start of the stream, the padding removed from the end, whether those
+values came from a LAME tag or were estimated from the MP3 frame structure, the total number of PCM frames in the
+raw decoded stream and the number of PCM frames that are actually emitted after trimming. Returns DRMP3_FALSE only
+when pMP3 or pInfo is NULL.
+*/
+DRMP3_API drmp3_bool32 drmp3_get_gapless_info(drmp3* pMP3, drmp3_gapless_info* pInfo);
 
 /*
 Calculates the total number of MP3 frames in the MP3 stream. Cannot be used for infinite streams such as internet
@@ -2937,6 +2993,10 @@ static drmp3_uint32 drmp3_decode_next_frame(drmp3* pMP3)
     return drmp3_decode_next_frame_ex(pMP3, (drmp3d_sample_t*)pMP3->pcmFrames, NULL, NULL);
 }
 
+/* Forward declaration. The definition lives next to drmp3_reset() which owns the state-clearing logic. */
+static void drmp3_estimate_gapless_fallback(drmp3* pMP3);
+static drmp3_bool32 drmp3_seek_to_start_of_stream(drmp3* pMP3);
+
 #if 0
 static drmp3_uint32 drmp3_seek_next_frame(drmp3* pMP3)
 {
@@ -2987,6 +3047,7 @@ static drmp3_bool32 drmp3_init_internal(drmp3* pMP3, drmp3_read_proc onRead, drm
     pMP3->streamStartOffset  = 0;
     pMP3->delayInPCMFrames   = 0;
     pMP3->paddingInPCMFrames = 0;
+    pMP3->hasLAMEInfo        = DRMP3_FALSE;
     pMP3->totalPCMFrameCount = DRMP3_UINT64_MAX;
 
     /* We'll first check for trailing tags. */
@@ -3382,6 +3443,7 @@ static drmp3_bool32 drmp3_init_internal(drmp3* pMP3, drmp3_read_proc onRead, drm
                         
                         pMP3->delayInPCMFrames   = (drmp3_uint32)delayInPCMFrames;
                         pMP3->paddingInPCMFrames = (drmp3_uint32)paddingInPCMFrames;
+                        pMP3->hasLAMEInfo        = DRMP3_TRUE;
                     }
 
                     /*
@@ -3438,6 +3500,15 @@ static drmp3_bool32 drmp3_init_internal(drmp3* pMP3, drmp3_read_proc onRead, drm
 
     pMP3->channels   = pMP3->mp3FrameChannels;
     pMP3->sampleRate = pMP3->mp3FrameSampleRate;
+
+    /*
+    When there is no LAME tag the encoder delay and end padding are unknown. Estimate them from the MP3 frame
+    structure and the digital silence actually present in the decoded PCM data. Streams without a seek callback
+    (e.g. an unseekable pipe) cannot be scanned and simply keep zero trim.
+    */
+    if (!pMP3->hasLAMEInfo && pMP3->onSeek != NULL) {
+        drmp3_estimate_gapless_fallback(pMP3);
+    }
 
     return DRMP3_TRUE;
 }
@@ -4313,6 +4384,7 @@ static drmp3_uint64 drmp3_read_pcm_frames_raw(drmp3* pMP3, drmp3_uint64 framesTo
 
     while (framesToRead > 0) {
         drmp3_uint32 framesToConsume;
+        drmp3_uint64 rawEndFrame;    /* First raw PCM frame that belongs to the end padding. */
 
         /* Skip frames if necessary. */
         if (pMP3->currentPCMFrame < pMP3->delayInPCMFrames) {
@@ -4325,16 +4397,18 @@ static drmp3_uint64 drmp3_read_pcm_frames_raw(drmp3* pMP3, drmp3_uint64 framesTo
 
         framesToConsume = (drmp3_uint32)DRMP3_MIN(pMP3->pcmFramesRemainingInMP3Frame, framesToRead);
 
-        /* Clamp the number of frames to read to the padding. */
-        if (pMP3->totalPCMFrameCount != DRMP3_UINT64_MAX && pMP3->totalPCMFrameCount > pMP3->paddingInPCMFrames) {
-            if (pMP3->currentPCMFrame < (pMP3->totalPCMFrameCount - pMP3->paddingInPCMFrames)) {
-                drmp3_uint64 framesRemainigToPadding = (pMP3->totalPCMFrameCount - pMP3->paddingInPCMFrames) - pMP3->currentPCMFrame;
-                if (framesToConsume >               framesRemainigToPadding) {
-                    framesToConsume = (drmp3_uint32)framesRemainigToPadding;
-                }
-            } else {
+        /*
+        Clamp the number of frames to read to the end padding. The raw stream length may be unknown
+        (DRMP3_UINT64_MAX) for unseekable streams; in that case the decoder's natural end-of-stream terminates
+        the read and no padding trim is applied.
+        */
+        if (pMP3->totalPCMFrameCount != DRMP3_UINT64_MAX && pMP3->totalPCMFrameCount >= pMP3->paddingInPCMFrames) {
+            rawEndFrame = pMP3->totalPCMFrameCount - pMP3->paddingInPCMFrames;
+            if (pMP3->currentPCMFrame >= rawEndFrame) {
                 /* We're into the padding. Abort. */
                 break;
+            } else if (rawEndFrame - pMP3->currentPCMFrame < framesToConsume) {
+                framesToConsume = (drmp3_uint32)(rawEndFrame - pMP3->currentPCMFrame);
             }
         }
 
@@ -4367,7 +4441,7 @@ static drmp3_uint64 drmp3_read_pcm_frames_raw(drmp3* pMP3, drmp3_uint64 framesTo
         }
 
         /* If the cursor is already at the padding we need to abort. */
-        if (pMP3->totalPCMFrameCount != DRMP3_UINT64_MAX && pMP3->totalPCMFrameCount > pMP3->paddingInPCMFrames && pMP3->currentPCMFrame >= (pMP3->totalPCMFrameCount - pMP3->paddingInPCMFrames)) {
+        if (pMP3->totalPCMFrameCount != DRMP3_UINT64_MAX && pMP3->totalPCMFrameCount >= pMP3->paddingInPCMFrames && pMP3->currentPCMFrame >= (pMP3->totalPCMFrameCount - pMP3->paddingInPCMFrames)) {
             break;
         }
 
@@ -4469,6 +4543,147 @@ static void drmp3_reset(drmp3* pMP3)
     drmp3dec_init(&pMP3->decoder);
 }
 
+#if defined(DR_MP3_FLOAT_OUTPUT)
+static drmp3_bool32 drmp3__sample_is_silence(float sample)
+{
+    float magnitude = (sample < 0) ? -sample : sample;
+    return magnitude <= DRMP3_SILENCE_THRESHOLD;
+}
+#else
+static drmp3_bool32 drmp3__sample_is_silence(drmp3_int16 sample)
+{
+    /* Widen before negating so INT16_MIN cannot overflow. */
+    int magnitude = (sample < 0) ? -(int)sample : (int)sample;
+    return magnitude <= (int)DRMP3_SILENCE_THRESHOLD;
+}
+#endif
+
+/* A PCM frame counts as digital silence only when every channel is silent. */
+static drmp3_bool32 drmp3__pcm_frame_is_silence(const drmp3d_sample_t* pFrame, drmp3_uint32 channels)
+{
+    drmp3_uint32 iChannel;
+
+    DRMP3_ASSERT(pFrame != NULL);
+    DRMP3_ASSERT(channels > 0);
+
+    for (iChannel = 0; iChannel < channels; ++iChannel) {
+        if (!drmp3__sample_is_silence(pFrame[iChannel])) {
+            return DRMP3_FALSE;
+        }
+    }
+
+    return DRMP3_TRUE;
+}
+
+/*
+Estimates the encoder delay and end padding for files without a LAME tag.
+
+The estimate is derived entirely from the stream itself: every MP3 frame is decoded once and its frame size
+(drmp3_hdr_frame_samples(), 384/576/1152 PCM frames depending on the MPEG version and layer) is accumulated to
+get the raw PCM frame count, and the leading/trailing runs of digital silence in the decoded PCM are measured to
+locate the trim points. No fixed encoder constant such as 528 or 1152 is assumed for the trim amount.
+
+The decoder is rewound to the start of the stream afterwards so ordinary frame-by-frame decoding and seeking are
+unaffected. If the stream cannot be rewound or contains no decodable audio the trim is left at zero.
+*/
+static void drmp3_estimate_gapless_fallback(drmp3* pMP3)
+{
+    drmp3d_sample_t framePCM[DRMP3_MAX_SAMPLES_PER_FRAME];
+    drmp3_uint64 totalPCMFrames = 0;
+    drmp3_uint64 leadingSilentFrames = 0;
+    drmp3_uint64 trailingSilentRun = 0;
+    drmp3_uint64 delayEstimate = 0;
+    drmp3_uint64 paddingEstimate = 0;
+    drmp3_uint32 channels;
+    drmp3_uint32 framesInMP3Frame;
+    drmp3_uint32 iPCMFrame;
+
+    DRMP3_ASSERT(pMP3 != NULL);
+    DRMP3_ASSERT(pMP3->onSeek != NULL);
+
+    channels = pMP3->channels;
+    if (channels == 0) {
+        channels = 1;
+    }
+
+    /* Rewind to the first MP3 frame so the scan covers the whole stream, including the frame consumed by init. */
+    if (!drmp3_seek_to_start_of_stream(pMP3)) {
+        return;
+    }
+
+    for (;;) {
+        framesInMP3Frame = drmp3_decode_next_frame_ex(pMP3, framePCM, NULL, NULL);
+        if (framesInMP3Frame == 0) {
+            break;
+        }
+
+        for (iPCMFrame = 0; iPCMFrame < framesInMP3Frame; ++iPCMFrame) {
+            const drmp3d_sample_t* pFrame = framePCM + ((size_t)iPCMFrame * channels);
+            drmp3_bool32 isSilent = drmp3__pcm_frame_is_silence(pFrame, channels);
+
+            if (isSilent && totalPCMFrames == leadingSilentFrames) {
+                leadingSilentFrames += 1;
+            }
+
+            if (isSilent) {
+                trailingSilentRun += 1;
+            } else {
+                trailingSilentRun = 0;
+            }
+
+            totalPCMFrames += 1;
+        }
+    }
+
+    /* Rewind again and leave the decoder in the same fresh state a normal initialization produces. */
+    if (!drmp3_seek_to_start_of_stream(pMP3)) {
+        return;
+    }
+
+    if (totalPCMFrames == 0) {
+        return;
+    }
+
+    delayEstimate   = leadingSilentFrames;
+    paddingEstimate = trailingSilentRun;
+
+    /*
+    Structural safety guard: always keep at least one MP3 frame worth of decoded audio and never trim more than
+    half of the stream. This prevents a fully silent or pathological file from collapsing the output to zero.
+    The bounds are expressed in MP3 frame sizes, not in hardcoded encoder delays.
+    */
+    {
+        drmp3_uint64 maxTrim = totalPCMFrames / 2;
+        /* Keep at least one MP3 frame of output, or one PCM frame for streams shorter than that. */
+        drmp3_uint64 minOutput = DRMP3_MIN((drmp3_uint64)DRMP3_MAX_PCM_FRAMES_PER_MP3_FRAME, totalPCMFrames);
+        if (minOutput == 0) {
+            minOutput = 1;
+        }
+
+        if (delayEstimate > maxTrim) {
+            delayEstimate = maxTrim;
+        }
+        if (paddingEstimate > maxTrim) {
+            paddingEstimate = maxTrim;
+        }
+        if (delayEstimate + paddingEstimate + minOutput > totalPCMFrames) {
+            paddingEstimate = (totalPCMFrames > delayEstimate + minOutput) ? (totalPCMFrames - delayEstimate - minOutput) : 0;
+        }
+        if (delayEstimate + paddingEstimate >= totalPCMFrames) {
+            delayEstimate = 0;
+            paddingEstimate = 0;
+        }
+    }
+
+    pMP3->delayInPCMFrames   = (drmp3_uint32)delayEstimate;
+    pMP3->paddingInPCMFrames = (drmp3_uint32)paddingEstimate;
+
+    /* A Xing/Info frame count was not available, so publish the measured raw frame count. */
+    if (pMP3->totalPCMFrameCount == DRMP3_UINT64_MAX) {
+        pMP3->totalPCMFrameCount = totalPCMFrames;
+    }
+}
+
 static drmp3_bool32 drmp3_seek_to_start_of_stream(drmp3* pMP3)
 {
     DRMP3_ASSERT(pMP3 != NULL);
@@ -4496,6 +4711,15 @@ static drmp3_uint64 drmp3_get_cursor_in_pcm_frames(const drmp3* pMP3)
     }
 
     return 0;
+}
+
+DRMP3_API drmp3_uint64 drmp3_get_cursor_pcm_frame(drmp3* pMP3)
+{
+    if (pMP3 == NULL) {
+        return 0;
+    }
+
+    return drmp3_get_cursor_in_pcm_frames(pMP3);
 }
 
 static drmp3_bool32 drmp3_seek_forward_by_pcm_frames__brute_force(drmp3* pMP3, drmp3_uint64 frameOffset)
@@ -4760,8 +4984,44 @@ DRMP3_API drmp3_uint64 drmp3_get_pcm_frame_count(drmp3* pMP3)
             return 0;
         }
 
+        /* The scan returns the raw count; apply the same gapless trim as the known-length path. */
+        if (totalPCMFrameCount >= pMP3->delayInPCMFrames) {
+            totalPCMFrameCount -= pMP3->delayInPCMFrames;
+        }
+        if (totalPCMFrameCount >= pMP3->paddingInPCMFrames) {
+            totalPCMFrameCount -= pMP3->paddingInPCMFrames;
+        }
+
         return totalPCMFrameCount;
     }
+}
+
+DRMP3_API drmp3_bool32 drmp3_get_gapless_info(drmp3* pMP3, drmp3_gapless_info* pInfo)
+{
+    drmp3_uint64 totalPCMFrameCount;
+    drmp3_uint64 delayAndPadding;
+
+    if (pMP3 == NULL || pInfo == NULL) {
+        return DRMP3_FALSE;
+    }
+
+    if (pMP3->totalPCMFrameCount != DRMP3_UINT64_MAX) {
+        totalPCMFrameCount = pMP3->totalPCMFrameCount;
+    } else if (drmp3_get_mp3_and_pcm_frame_count(pMP3, NULL, &totalPCMFrameCount)) {
+        /* Got the raw count from a full-stream scan. */
+    } else {
+        totalPCMFrameCount = 0;
+    }
+
+    pInfo->hasLAMEInfo        = pMP3->hasLAMEInfo;
+    pInfo->delayInPCMFrames   = pMP3->delayInPCMFrames;
+    pInfo->paddingInPCMFrames = pMP3->paddingInPCMFrames;
+    pInfo->totalPCMFrameCount = totalPCMFrameCount;
+
+    delayAndPadding = (drmp3_uint64)pMP3->delayInPCMFrames + (drmp3_uint64)pMP3->paddingInPCMFrames;
+    pInfo->outputPCMFrameCount = (totalPCMFrameCount > delayAndPadding) ? (totalPCMFrameCount - delayAndPadding) : 0;
+
+    return DRMP3_TRUE;
 }
 
 DRMP3_API drmp3_uint64 drmp3_get_mp3_frame_count(drmp3* pMP3)
