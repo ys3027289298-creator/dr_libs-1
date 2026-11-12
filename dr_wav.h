@@ -670,6 +670,28 @@ typedef struct
 } drwav_cue;
 
 /*
+Marker
+
+A marker is a simplified representation of a cue point with an optional label. This is used by
+drwav_init_write_with_markers() and drwav_init_file_write_with_markers() to write a "cue " chunk
+along with a "LIST" chunk of type "adtl" containing the labels.
+*/
+typedef struct
+{
+    /* Unique identification value. Written as the ID of the cue point and referenced by its label. */
+    drwav_uint32 id;
+
+    /* The offset of the marker in samples from the start of the audio data. */
+    drwav_uint32 sampleOffset;
+
+    /* Optional null-terminated label for the marker. Can be NULL or empty in which case no label is written. */
+    const char* pLabel;
+} drwav_marker;
+
+/* The maximum number of markers that can be passed to drwav_init_write_with_markers() and drwav_init_file_write_with_markers(). */
+#define DRWAV_MAX_MARKER_COUNT  1024
+
+/*
 Acid Metadata
 
 This chunk contains some information about the time signature and the tempo of the audio.
@@ -928,6 +950,9 @@ typedef struct
     drwav_metadata* pMetadata;
     drwav_uint32 metadataCount;
 
+    /* Whether or not the metadata array was allocated by dr_wav itself and needs to be freed in drwav_uninit() when in write mode. Set by drwav_init_write_with_markers(). */
+    drwav_bool32 ownsMetadata;
+
 
     /* A hack to avoid a DRWAV_MALLOC() when opening a decoder with drwav_init_memory(). */
     drwav__memory_stream memoryStream;
@@ -1021,6 +1046,23 @@ DRWAV_API drwav_bool32 drwav_init_write(drwav* pWav, const drwav_data_format* pF
 DRWAV_API drwav_bool32 drwav_init_write_sequential(drwav* pWav, const drwav_data_format* pFormat, drwav_uint64 totalSampleCount, drwav_write_proc onWrite, void* pUserData, const drwav_allocation_callbacks* pAllocationCallbacks);
 DRWAV_API drwav_bool32 drwav_init_write_sequential_pcm_frames(drwav* pWav, const drwav_data_format* pFormat, drwav_uint64 totalPCMFrameCount, drwav_write_proc onWrite, void* pUserData, const drwav_allocation_callbacks* pAllocationCallbacks);
 DRWAV_API drwav_bool32 drwav_init_write_with_metadata(drwav* pWav, const drwav_data_format* pFormat, drwav_write_proc onWrite, drwav_seek_proc onSeek, void* pUserData, const drwav_allocation_callbacks* pAllocationCallbacks, drwav_metadata* pMetadata, drwav_uint32 metadataCount);
+
+/*
+Initializes a new wav writer, writing the given markers as a "cue " chunk and a "LIST" chunk of type "adtl" holding the labels.
+
+The markers are specified as an array of drwav_marker objects, each holding an ID, a sample offset and an optional null-terminated
+label. Markers with a NULL or empty label will not have a label written for them. The "cue " chunk is written before the "LIST"
+chunk, which in turn is written before the "data" chunk, as per the WAV specification.
+
+Returns DRWAV_FALSE if markerCount exceeds DRWAV_MAX_MARKER_COUNT.
+
+If pMarkers is NULL or markerCount is 0 this is equivalent to drwav_init_write() and the output will be byte-for-byte identical.
+
+Close the writer with drwav_uninit().
+
+See also: drwav_init_write(), drwav_init_file_write_with_markers(), drwav_uninit()
+*/
+DRWAV_API drwav_bool32 drwav_init_write_with_markers(drwav* pWav, const drwav_data_format* pFormat, drwav_write_proc onWrite, drwav_seek_proc onSeek, void* pUserData, const drwav_allocation_callbacks* pAllocationCallbacks, const drwav_marker* pMarkers, drwav_uint32 markerCount);
 
 /*
 Utility function to determine the target size of the entire data to be written (including all headers and chunks).
@@ -1262,6 +1304,7 @@ any given time.
 DRWAV_API drwav_bool32 drwav_init_file_write(drwav* pWav, const char* filename, const drwav_data_format* pFormat, const drwav_allocation_callbacks* pAllocationCallbacks);
 DRWAV_API drwav_bool32 drwav_init_file_write_sequential(drwav* pWav, const char* filename, const drwav_data_format* pFormat, drwav_uint64 totalSampleCount, const drwav_allocation_callbacks* pAllocationCallbacks);
 DRWAV_API drwav_bool32 drwav_init_file_write_sequential_pcm_frames(drwav* pWav, const char* filename, const drwav_data_format* pFormat, drwav_uint64 totalPCMFrameCount, const drwav_allocation_callbacks* pAllocationCallbacks);
+DRWAV_API drwav_bool32 drwav_init_file_write_with_markers(drwav* pWav, const char* filename, const drwav_data_format* pFormat, const drwav_allocation_callbacks* pAllocationCallbacks, const drwav_marker* pMarkers, drwav_uint32 markerCount);
 DRWAV_API drwav_bool32 drwav_init_file_write_w(drwav* pWav, const wchar_t* filename, const drwav_data_format* pFormat, const drwav_allocation_callbacks* pAllocationCallbacks);
 DRWAV_API drwav_bool32 drwav_init_file_write_sequential_w(drwav* pWav, const wchar_t* filename, const drwav_data_format* pFormat, drwav_uint64 totalSampleCount, const drwav_allocation_callbacks* pAllocationCallbacks);
 DRWAV_API drwav_bool32 drwav_init_file_write_sequential_pcm_frames_w(drwav* pWav, const wchar_t* filename, const drwav_data_format* pFormat, drwav_uint64 totalPCMFrameCount, const drwav_allocation_callbacks* pAllocationCallbacks);
@@ -4833,6 +4876,125 @@ DRWAV_API drwav_bool32 drwav_init_write_with_metadata(drwav* pWav, const drwav_d
     return drwav_init_write__internal(pWav, pFormat, 0);
 }
 
+/*
+Builds a metadata array from an array of markers. The first object is always a drwav_metadata_type_cue object holding
+every marker as a cue point. This is followed by one drwav_metadata_type_list_label object for each marker with a
+non-empty label.
+
+The returned memory is a single allocation holding the metadata objects, the cue points and the label strings, and
+must be freed with drwav__free_from_callbacks().
+*/
+DRWAV_PRIVATE drwav_metadata* drwav__metadata_from_markers(const drwav_marker* pMarkers, drwav_uint32 markerCount, const drwav_allocation_callbacks* pAllocationCallbacks, drwav_uint32* pMetadataCountOut)
+{
+    drwav_metadata* pMetadata;
+    drwav_cue_point* pCuePoints;
+    char* pStrings;
+    size_t allocationSize;
+    size_t labelStringsSize = 0;
+    drwav_uint32 labelCount = 0;
+    drwav_uint32 iMarker;
+    drwav_uint32 iMetadata;
+
+    DRWAV_ASSERT(pMarkers != NULL);
+    DRWAV_ASSERT(markerCount > 0);
+    DRWAV_ASSERT(pMetadataCountOut != NULL);
+
+    for (iMarker = 0; iMarker < markerCount; ++iMarker) {
+        if (pMarkers[iMarker].pLabel != NULL && pMarkers[iMarker].pLabel[0] != '\0') {
+            labelCount += 1;
+            labelStringsSize += drwav__strlen(pMarkers[iMarker].pLabel) + 1;
+        }
+    }
+
+    allocationSize = sizeof(drwav_metadata) * (1 + labelCount) + sizeof(drwav_cue_point) * markerCount + labelStringsSize;
+
+    pMetadata = (drwav_metadata*)drwav__malloc_from_callbacks(allocationSize, pAllocationCallbacks);
+    if (pMetadata == NULL) {
+        return NULL;
+    }
+
+    DRWAV_ZERO_MEMORY(pMetadata, sizeof(drwav_metadata) * (1 + labelCount));
+
+    pCuePoints = (drwav_cue_point*)(pMetadata + (1 + labelCount));
+    pStrings   = (char*)(pCuePoints + markerCount);
+
+    /* The cue chunk always comes first so that it is written before the "LIST/adtl" chunk holding the labels. */
+    pMetadata[0].type                   = drwav_metadata_type_cue;
+    pMetadata[0].data.cue.cuePointCount = markerCount;
+    pMetadata[0].data.cue.pCuePoints    = pCuePoints;
+
+    for (iMarker = 0; iMarker < markerCount; ++iMarker) {
+        pCuePoints[iMarker].id                = pMarkers[iMarker].id;
+        pCuePoints[iMarker].playOrderPosition = 0;
+        pCuePoints[iMarker].dataChunkId[0]    = 'd';
+        pCuePoints[iMarker].dataChunkId[1]    = 'a';
+        pCuePoints[iMarker].dataChunkId[2]    = 't';
+        pCuePoints[iMarker].dataChunkId[3]    = 'a';
+        pCuePoints[iMarker].chunkStart        = 0;
+        pCuePoints[iMarker].blockStart        = 0;
+        pCuePoints[iMarker].sampleOffset      = pMarkers[iMarker].sampleOffset;
+    }
+
+    iMetadata = 1;
+    for (iMarker = 0; iMarker < markerCount; ++iMarker) {
+        if (pMarkers[iMarker].pLabel != NULL && pMarkers[iMarker].pLabel[0] != '\0') {
+            size_t labelLength = drwav__strlen(pMarkers[iMarker].pLabel);
+
+            pMetadata[iMetadata].type                            = drwav_metadata_type_list_label;
+            pMetadata[iMetadata].data.labelOrNote.cuePointId     = pMarkers[iMarker].id;
+            pMetadata[iMetadata].data.labelOrNote.stringLength   = (drwav_uint32)labelLength;
+            pMetadata[iMetadata].data.labelOrNote.pString        = pStrings;
+
+            DRWAV_COPY_MEMORY(pStrings, pMarkers[iMarker].pLabel, labelLength + 1);
+            pStrings += labelLength + 1;
+
+            iMetadata += 1;
+        }
+    }
+
+    *pMetadataCountOut = 1 + labelCount;
+
+    return pMetadata;
+}
+
+DRWAV_API drwav_bool32 drwav_init_write_with_markers(drwav* pWav, const drwav_data_format* pFormat, drwav_write_proc onWrite, drwav_seek_proc onSeek, void* pUserData, const drwav_allocation_callbacks* pAllocationCallbacks, const drwav_marker* pMarkers, drwav_uint32 markerCount)
+{
+    drwav_metadata* pMetadata;
+    drwav_uint32 metadataCount;
+    drwav_bool32 result;
+
+    if (pMarkers == NULL || markerCount == 0) {
+        return drwav_init_write(pWav, pFormat, onWrite, onSeek, pUserData, pAllocationCallbacks);
+    }
+
+    if (markerCount > DRWAV_MAX_MARKER_COUNT) {
+        return DRWAV_FALSE;
+    }
+
+    if (!drwav_preinit_write(pWav, pFormat, DRWAV_FALSE, onWrite, onSeek, pUserData, pAllocationCallbacks)) {
+        return DRWAV_FALSE;
+    }
+
+    pMetadata = drwav__metadata_from_markers(pMarkers, markerCount, &pWav->allocationCallbacks, &metadataCount);
+    if (pMetadata == NULL) {
+        return DRWAV_FALSE;
+    }
+
+    pWav->pMetadata     = pMetadata;
+    pWav->metadataCount = metadataCount;
+    pWav->ownsMetadata  = DRWAV_TRUE;
+
+    result = drwav_init_write__internal(pWav, pFormat, 0);
+    if (result != DRWAV_TRUE) {
+        drwav__free_from_callbacks(pMetadata, &pWav->allocationCallbacks);
+        pWav->pMetadata     = NULL;
+        pWav->metadataCount = 0;
+        pWav->ownsMetadata  = DRWAV_FALSE;
+    }
+
+    return result;
+}
+
 
 DRWAV_API drwav_uint64 drwav_target_write_size_bytes(const drwav_data_format* pFormat, drwav_uint64 totalFrameCount, drwav_metadata* pMetadata, drwav_uint32 metadataCount)
 {
@@ -5598,6 +5760,25 @@ DRWAV_API drwav_bool32 drwav_init_file_write(drwav* pWav, const char* filename, 
     return drwav_init_file_write__internal(pWav, filename, pFormat, 0, DRWAV_FALSE, pAllocationCallbacks);
 }
 
+DRWAV_API drwav_bool32 drwav_init_file_write_with_markers(drwav* pWav, const char* filename, const drwav_data_format* pFormat, const drwav_allocation_callbacks* pAllocationCallbacks, const drwav_marker* pMarkers, drwav_uint32 markerCount)
+{
+    FILE* pFile;
+    drwav_bool32 result;
+
+    if (drwav_fopen(&pFile, filename, "wb") != DRWAV_SUCCESS) {
+        return DRWAV_FALSE;
+    }
+
+    /* This takes ownership of the FILE* object. */
+    result = drwav_init_write_with_markers(pWav, pFormat, drwav__on_write_stdio, drwav__on_seek_stdio, (void*)pFile, pAllocationCallbacks, pMarkers, markerCount);
+    if (result != DRWAV_TRUE) {
+        fclose(pFile);
+        return result;
+    }
+
+    return DRWAV_TRUE;
+}
+
 DRWAV_API drwav_bool32 drwav_init_file_write_sequential(drwav* pWav, const char* filename, const drwav_data_format* pFormat, drwav_uint64 totalSampleCount, const drwav_allocation_callbacks* pAllocationCallbacks)
 {
     return drwav_init_file_write__internal(pWav, filename, pFormat, totalSampleCount, DRWAV_TRUE, pAllocationCallbacks);
@@ -5935,6 +6116,13 @@ DRWAV_API drwav_result drwav_uninit(drwav* pWav)
             if (pWav->dataChunkDataSize != pWav->dataChunkDataSizeTargetWrite) {
                 result = DRWAV_INVALID_FILE;
             }
+        }
+
+        if (pWav->ownsMetadata) {
+            drwav_free(pWav->pMetadata, &pWav->allocationCallbacks);
+            pWav->pMetadata     = NULL;
+            pWav->metadataCount = 0;
+            pWav->ownsMetadata  = DRWAV_FALSE;
         }
     } else {
         drwav_free(pWav->pMetadata, &pWav->allocationCallbacks);
