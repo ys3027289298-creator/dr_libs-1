@@ -12,6 +12,7 @@ option(DR_LIBS_NO_SIMD            "Disable SIMD"              OFF)
 option(DR_LIBS_NO_WAV             "Disable WAV"               OFF)
 option(DR_LIBS_NO_FLAC            "Disable FLAC"              OFF)
 option(DR_LIBS_NO_MP3             "Disable MP3"               OFF)
+option(DR_LIBS_NO_OPUS            "Disable Opus"              OFF)
 option(DR_LIBS_USE_BUNDLED_DEPENDENCIES "Build test dependencies from external/ without searching for system packages" OFF)
 
 # Construct compiler flags.
@@ -286,5 +287,18 @@ if(NOT DR_LIBS_NO_MP3)
 
     if(DR_LIBS_BUILD_FUZZERS)
         add_dr_libs_fuzzer(dr_mp3_fuzzer tests/fuzzing/dr_mp3_fuzzer.cc)
+    endif()
+endif()
+
+
+# OPUS
+if(NOT DR_LIBS_NO_OPUS)
+    if(DR_LIBS_BUILD_TESTS)
+        add_library(dr_opus_compilation STATIC tests/compilation/dr_opus.c)
+        target_link_libraries(dr_opus_compilation PRIVATE dr_libs_interface)
+
+        # Standalone Opus test tool. Does not require the reference decoder dependencies.
+        add_executable(dr_libs_test_opus tests/dr_libs_test_opus.c)
+        target_link_libraries(dr_libs_test_opus PRIVATE dr_libs_interface ${COMMON_LIBRARIES})
     endif()
 endif()
